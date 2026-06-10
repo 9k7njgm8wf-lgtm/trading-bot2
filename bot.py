@@ -5,8 +5,8 @@ from datetime import datetime, timezone, timedelta
 
 # ─── CONFIG ───────────────────────────────────────────────
 GROQ_API_KEY     = "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"
-ALPACA_API_KEY   = "PKOVEOWJ7IHAU4ZRT2W4RN6FCO"
-ALPACA_SECRET    = "63kexZGqCue9eMii6Py6S13AwZks7y3mwTDi1TcmhKhK"
+ALPACA_API_KEY   = "AKPYM4PLBJBOEBSD3NQQVEDALI"
+ALPACA_SECRET    = "6Z73eeNG8Fpa64Tw7UBaEULCyFHJRCSh6r3kRgC7k2qo"
 TELEGRAM_TOKEN   = "8855798705:AAFhs2RYnLUVxR-N2C2urTzl445NZn2fxv8"
 TELEGRAM_CHAT_ID = "6903579390"
 
@@ -112,7 +112,7 @@ async def get_news_sentiment(session, ticker):
 async def get_bars(session, ticker, timeframe="5Min", limit=50):
     url = f"{ALPACA_BASE}/stocks/{ticker}/bars"
     try:
-        async with session.get(url, headers=ALPACA_HEADERS, params={"timeframe": timeframe, "limit": limit, "feed": "iex"}) as r:
+        async with session.get(url, headers=ALPACA_HEADERS, params={"timeframe": timeframe, "limit": limit, "feed": "sip"}) as r:
             data = await r.json()
             return data.get("bars", [])
     except Exception as e:
@@ -155,6 +155,21 @@ def calc_vol_ratio(bars):
     v=[b['v'] for b in bars]; avg=sum(v[:-1])/len(v[:-1])
     return round(v[-1]/avg if avg>0 else 0,2)
 
+
+def calc_rvol(bars_today, bars_yesterday):
+    """Relative Volume vs same time yesterday"""
+    if not bars_today or not bars_yesterday: return None
+    today_vol = sum(b["v"] for b in bars_today)
+    yest_vol  = sum(b["v"] for b in bars_yesterday[:len(bars_today)])
+    if yest_vol == 0: return None
+    return round(today_vol / yest_vol, 2)
+
+def get_multiday_levels(bars_daily):
+    if len(bars_daily) < 2: return None
+    prev = bars_daily[-2]
+    ph,pl,pc = round(prev["h"],4),round(prev["l"],4),round(prev["c"],4)
+    pivot = round((ph+pl+pc)/3,4)
+    return {"prev_high":ph,"prev_low":pl,"prev_close":pc,"pivot":pivot,"r1":round(2*pivot-pl,4),"s1":round(2*pivot-ph,4)}
 def get_sr(bars,n=20):
     r=bars[-n:]
     return round(min(b['l'] for b in r),4),round(max(b['h'] for b in r),4)
@@ -454,7 +469,9 @@ def format_signal(ticker, result, yahoo_price, yahoo_change, status, sentiment, 
 🔊 Vol: {result['vol_ratio']}x  |  {t15e} 15m: {result['trend_15m']}
 {m1e} 1m: {result['momentum_1m']}  |  🏆 Score: {score}/12
 ━━━━━━━━━━━━━━━━━━━━━
-🏷 S: ${result['support']}  R: ${result['resistance']}
+📊 RVOL: {result.get('rvol','N/A')}x vs yesterday
+🗷 S: ${result['support']}  R: ${result['resistance']}
+{"\n📅 Pivot: $"+str(result['multiday']['pivot'])+"  PrevH: $"+str(result['multiday']['prev_high'])+"  PrevL: $"+str(result['multiday']['prev_low']) if result.get('multiday') else ""}
 🕐 {now}"""
 
 # ─── DAILY REPORT ─────────────────────────────────────────
@@ -586,14 +603,20 @@ async def main():
             for ticker in list(watchlist):
                 try:
                     print(f"  📡 {ticker}...")
-                    bars_1m,bars_5m,bars_15m = await asyncio.gather(
+                    bars_1m,bars_5m,bars_15m,bars_daily,bars_yest = await asyncio.gather(
                         get_bars(session,ticker,"1Min",30),
                         get_bars(session,ticker,"5Min",50),
                         get_bars(session,ticker,"15Min",50),
+                        get_bars(session,ticker,"1Day",5),
+                        get_bars(session,ticker,"1Day",3),
                     )
                     if len(bars_5m)<20: print(f"    ⚠️ Not enough bars"); continue
 
                     update_orb(ticker,bars_1m)
+                    rvol = calc_rvol(bars_1m, bars_yest)
+                    multiday = get_multiday_levels(bars_daily)
+                    if result: result["rvol"] = rvol
+                    if result and multiday: result["multiday"] = multiday
                     result=compute_signal(bars_1m,bars_5m,bars_15m)
                     if result is None: print(f"    ⏳ WAIT"); continue
                     if is_duplicate(ticker,result["signal"]): print(f"    🔄 Duplicate"); continue
