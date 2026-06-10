@@ -1,7 +1,7 @@
 import asyncio
 import aiohttp
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 
 # ─── CONFIG ───────────────────────────────────────────────
 GROQ_API_KEY     = "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"
@@ -12,7 +12,7 @@ TELEGRAM_CHAT_ID = "6903579390"
 
 TICKERS  = ["RGTI", "RXT", "QUBT", "LUNR"]
 TIMEFRAME = "5Min"
-ANALYSIS_INTERVAL = 300  # every 5 minutes
+ANALYSIS_INTERVAL = 300
 
 ALPACA_BASE    = "https://data.alpaca.markets/v2"
 ALPACA_HEADERS = {
@@ -32,7 +32,23 @@ async def send_telegram(session, message):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-# ─── ALPACA: GET BARS ──────────────────────────────────────
+# ─── YAHOO FINANCE PRICE ──────────────────────────────────
+async def get_yahoo_price(session, ticker):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    params = {"interval": "1m", "range": "1d"}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            data = await resp.json()
+            price = data["chart"]["result"][0]["meta"]["regularMarketPrice"]
+            prev_close = data["chart"]["result"][0]["meta"]["chartPreviousClose"]
+            change_pct = ((price - prev_close) / prev_close) * 100
+            return round(price, 4), round(change_pct, 2)
+    except Exception as e:
+        print(f"Yahoo price error {ticker}: {e}")
+        return None, None
+
+# ─── ALPACA BARS ──────────────────────────────────────────
 async def get_bars(session, ticker):
     url = f"{ALPACA_BASE}/stocks/{ticker}/bars"
     params = {"timeframe": TIMEFRAME, "limit": 50, "feed": "iex"}
@@ -44,129 +60,88 @@ async def get_bars(session, ticker):
         print(f"Bars error {ticker}: {e}")
         return []
 
-# ─── VWAP CALCULATION ─────────────────────────────────────
+# ─── INDICATORS ───────────────────────────────────────────
 def calculate_vwap(bars):
-    """VWAP = cumulative(typical_price * volume) / cumulative(volume)"""
-    cumulative_tp_vol = 0
-    cumulative_vol = 0
+    cum_tp_vol, cum_vol = 0, 0
     vwap_values = []
     for b in bars:
-        typical_price = (b['h'] + b['l'] + b['c']) / 3
-        cumulative_tp_vol += typical_price * b['v']
-        cumulative_vol += b['v']
-        vwap = cumulative_tp_vol / cumulative_vol if cumulative_vol > 0 else 0
-        vwap_values.append(round(vwap, 4))
+        tp = (b['h'] + b['l'] + b['c']) / 3
+        cum_tp_vol += tp * b['v']
+        cum_vol += b['v']
+        vwap_values.append(round(cum_tp_vol / cum_vol if cum_vol > 0 else 0, 4))
     return vwap_values
 
-# ─── RSI CALCULATION ──────────────────────────────────────
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
         return None
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        diff = closes[i] - closes[i-1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
+    gains = [max(closes[i]-closes[i-1], 0) for i in range(1, len(closes))]
+    losses = [max(closes[i-1]-closes[i], 0) for i in range(1, len(closes))]
     avg_gain = sum(gains[-period:]) / period
     avg_loss = sum(losses[-period:]) / period
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return round(100 - (100 / (1 + rs)), 2)
+    if avg_loss == 0: return 100
+    return round(100 - (100 / (1 + avg_gain/avg_loss)), 2)
 
-# ─── EMA CALCULATION ──────────────────────────────────────
 def calculate_ema(values, period):
-    if len(values) < period:
-        return None
+    if len(values) < period: return None
     k = 2 / (period + 1)
     ema = sum(values[:period]) / period
     for v in values[period:]:
         ema = v * k + ema * (1 - k)
     return round(ema, 4)
 
-# ─── VOLUME ANALYSIS ──────────────────────────────────────
 def analyze_volume(bars):
-    if len(bars) < 10:
-        return None, None
+    if len(bars) < 10: return None, None
     volumes = [b['v'] for b in bars]
-    avg_volume = sum(volumes[:-1]) / len(volumes[:-1])
-    current_volume = volumes[-1]
-    volume_ratio = round(current_volume / avg_volume, 2) if avg_volume > 0 else 0
-    return round(avg_volume), volume_ratio
+    avg_vol = sum(volumes[:-1]) / len(volumes[:-1])
+    return round(avg_vol), round(volumes[-1] / avg_vol if avg_vol > 0 else 0, 2)
 
-# ─── SUPPORT & RESISTANCE ─────────────────────────────────
 def get_support_resistance(bars):
-    if len(bars) < 5:
-        return None, None
-    highs = [b['h'] for b in bars[-20:]]
-    lows  = [b['l'] for b in bars[-20:]]
-    resistance = round(max(highs), 4)
-    support    = round(min(lows), 4)
-    return support, resistance
+    if len(bars) < 5: return None, None
+    recent = bars[-20:]
+    return round(min(b['l'] for b in recent), 4), round(max(b['h'] for b in recent), 4)
 
-# ─── MAIN SIGNAL LOGIC ────────────────────────────────────
+# ─── SIGNAL LOGIC ─────────────────────────────────────────
 def compute_signal(bars):
-    if len(bars) < 15:
-        return None
-
-    closes  = [b['c'] for b in bars]
+    if len(bars) < 15: return None
+    closes = [b['c'] for b in bars]
     current_price = closes[-1]
 
-    # Indicators
-    vwap_values = calculate_vwap(bars)
+    vwap_values  = calculate_vwap(bars)
     current_vwap = vwap_values[-1]
     prev_vwap    = vwap_values[-2]
 
-    rsi = calculate_rsi(closes)
+    rsi   = calculate_rsi(closes)
     ema9  = calculate_ema(closes, 9)
     ema21 = calculate_ema(closes, 21)
-
-    avg_vol, vol_ratio = analyze_volume(bars)
+    _, vol_ratio = analyze_volume(bars)
     support, resistance = get_support_resistance(bars)
 
-    # VWAP signals
-    price_above_vwap = current_price > current_vwap
+    price_above_vwap         = current_price > current_vwap
     price_crossed_above_vwap = current_price > current_vwap and closes[-2] <= prev_vwap
     price_crossed_below_vwap = current_price < current_vwap and closes[-2] >= prev_vwap
+    high_volume  = vol_ratio >= 1.5
+    ema_bullish  = ema9 > ema21 if ema9 and ema21 else False
+    ema_bearish  = ema9 < ema21 if ema9 and ema21 else False
 
-    # Volume confirmation (high volume = strong signal)
-    high_volume = vol_ratio >= 1.5
-
-    # EMA trend
-    ema_bullish = ema9 > ema21 if ema9 and ema21 else False
-    ema_bearish = ema9 < ema21 if ema9 and ema21 else False
-
-    # Scoring system
-    buy_score  = 0
-    sell_score = 0
-
-    # VWAP (most important - 3 points)
+    buy_score = sell_score = 0
     if price_crossed_above_vwap: buy_score += 3
     elif price_above_vwap:       buy_score += 1
     if price_crossed_below_vwap: sell_score += 3
     elif not price_above_vwap:   sell_score += 1
-
-    # Volume confirmation (2 points)
     if high_volume:
         if price_above_vwap: buy_score += 2
         else:                sell_score += 2
-
-    # RSI (2 points)
     if rsi:
         if rsi < 35:  buy_score += 2
         elif rsi < 50 and price_above_vwap: buy_score += 1
         if rsi > 65:  sell_score += 2
         elif rsi > 50 and not price_above_vwap: sell_score += 1
-
-    # EMA (1 point)
     if ema_bullish: buy_score += 1
     if ema_bearish: sell_score += 1
 
-    # Determine signal
     if buy_score >= 4:
         signal     = "BUY"
         confidence = "HIGH" if buy_score >= 6 else "MEDIUM"
-        # SL below recent support or VWAP, TP at resistance
         sl = round(min(current_vwap, support) * 0.995, 4) if support else round(current_price * 0.98, 4)
         tp = round(resistance * 0.998, 4) if resistance else round(current_price * 1.04, 4)
     elif sell_score >= 4:
@@ -175,65 +150,58 @@ def compute_signal(bars):
         sl = round(max(current_vwap, resistance) * 1.005, 4) if resistance else round(current_price * 1.02, 4)
         tp = round(support * 1.002, 4) if support else round(current_price * 0.96, 4)
     else:
-        return None  # No strong signal — stay quiet
+        return None
 
     risk   = abs(current_price - sl)
     reward = abs(tp - current_price)
     rr     = f"1:{round(reward/risk, 1)}" if risk > 0 else "N/A"
-
-    trend = "UPTREND" if ema_bullish else "DOWNTREND" if ema_bearish else "SIDEWAYS"
+    trend  = "UPTREND" if ema_bullish else "DOWNTREND" if ema_bearish else "SIDEWAYS"
 
     return {
-        "signal":       signal,
-        "confidence":   confidence,
-        "entry":        round(current_price, 4),
-        "sl":           sl,
-        "tp":           tp,
-        "rr":           rr,
-        "vwap":         current_vwap,
-        "rsi":          rsi,
-        "ema9":         ema9,
-        "ema21":        ema21,
-        "vol_ratio":    vol_ratio,
-        "trend":        trend,
-        "buy_score":    buy_score,
-        "sell_score":   sell_score,
-        "support":      support,
-        "resistance":   resistance,
+        "signal": signal, "confidence": confidence,
+        "entry": round(current_price, 4),
+        "sl": sl, "tp": tp, "rr": rr,
+        "vwap": current_vwap, "rsi": rsi,
+        "ema9": ema9, "ema21": ema21,
+        "vol_ratio": vol_ratio, "trend": trend,
+        "support": support, "resistance": resistance,
     }
 
-# ─── FORMAT TELEGRAM MESSAGE ──────────────────────────────
-def format_message(ticker, result):
+# ─── FORMAT MESSAGE ───────────────────────────────────────
+def format_message(ticker, result, yahoo_price, yahoo_change):
     signal = result["signal"]
     now    = datetime.now().strftime("%H:%M:%S")
-
-    if signal == "BUY":
-        header = f"🟢 <b>BUY — {ticker}</b>"
-    else:
-        header = f"🔴 <b>SELL — {ticker}</b>"
-
-    conf_emoji = "🔥" if result["confidence"] == "HIGH" else "⚡"
+    header = f"🟢 <b>BUY — {ticker}</b>" if signal == "BUY" else f"🔴 <b>SELL — {ticker}</b>"
+    conf_emoji  = "🔥" if result["confidence"] == "HIGH" else "⚡"
     trend_emoji = "📈" if result["trend"] == "UPTREND" else "📉" if result["trend"] == "DOWNTREND" else "➡️"
+    vwap_pos    = "Above VWAP ✅" if result["entry"] > result["vwap"] else "Below VWAP ⚠️"
 
-    vwap_pos = "Above VWAP ✅" if result["entry"] > result["vwap"] else "Below VWAP ⚠️"
+    # Yahoo price line
+    if yahoo_price:
+        change_emoji = "📈" if yahoo_change and yahoo_change >= 0 else "📉"
+        change_str   = f"+{yahoo_change}%" if yahoo_change and yahoo_change >= 0 else f"{yahoo_change}%"
+        yahoo_line   = f"📱 <b>Current Price (Yahoo):</b>  <b>${yahoo_price}</b>  {change_emoji} {change_str} today"
+    else:
+        yahoo_line = "📱 <b>Current Price:</b>  unavailable"
 
     msg = f"""{header}
 
-💰 <b>Entry:</b>  ${result['entry']}
+{yahoo_line}
+━━━━━━━━━━━━━━━━━━━━━
+🎯 <b>Entry:</b>  ${result['entry']}
 🛑 <b>Stop Loss:</b>  ${result['sl']}
 ✅ <b>Take Profit:</b>  ${result['tp']}
 ⚖️ <b>Risk/Reward:</b>  {result['rr']}
-
+━━━━━━━━━━━━━━━━━━━━━
 📊 <b>VWAP:</b>  ${result['vwap']}  |  {vwap_pos}
 📉 <b>RSI:</b>  {result['rsi']}
 📈 <b>EMA 9/21:</b>  {result['ema9']} / {result['ema21']}
 🔊 <b>Volume:</b>  {result['vol_ratio']}x average
 {trend_emoji} <b>Trend:</b>  {result['trend']}
 {conf_emoji} <b>Confidence:</b>  {result['confidence']}
-
-🏷 S: ${result['support']}  |  R: ${result['resistance']}
-🕐 {now}  |  {TIMEFRAME}
-─────────────────────"""
+━━━━━━━━━━━━━━━━━━━━━
+🏷 Support: ${result['support']}  |  Resistance: ${result['resistance']}
+🕐 {now}  |  {TIMEFRAME}"""
     return msg
 
 # ─── MAIN LOOP ────────────────────────────────────────────
@@ -244,9 +212,9 @@ async def main():
             "🤖 <b>AlphaSignal VWAP Bot Started!</b>\n\n"
             f"📊 Watching: {', '.join(TICKERS)}\n"
             f"📐 Strategy: VWAP + Volume + RSI + EMA\n"
-            f"⏱ Timeframe: {TIMEFRAME}\n"
-            f"🔄 Analyzing every {ANALYSIS_INTERVAL//60} minutes\n\n"
-            "Only HIGH/MEDIUM confidence signals will be sent. 🚀"
+            f"📱 Live price from Yahoo Finance added!\n"
+            f"⏱ Timeframe: {TIMEFRAME}\n\n"
+            "Only HIGH/MEDIUM confidence signals sent. 🚀"
         )
 
         while True:
@@ -256,28 +224,28 @@ async def main():
                     bars = await get_bars(session, ticker)
 
                     if len(bars) < 15:
-                        print(f"  ⚠️ Not enough bars for {ticker}: {len(bars)}")
+                        print(f"  ⚠️ Not enough bars: {len(bars)}")
                         continue
 
                     result = compute_signal(bars)
-
                     if result is None:
-                        print(f"  ⏳ {ticker}: No strong signal (WAIT)")
+                        print(f"  ⏳ {ticker}: WAIT — no strong signal")
                         continue
 
-                    print(f"  ✅ {ticker}: {result['signal']} | Conf: {result['confidence']} | R:R {result['rr']} | RSI: {result['rsi']} | Vol: {result['vol_ratio']}x")
+                    # Get Yahoo live price
+                    yahoo_price, yahoo_change = await get_yahoo_price(session, ticker)
+                    print(f"  💰 Signal: {result['signal']} | Entry: ${result['entry']} | Yahoo: ${yahoo_price}")
 
-                    msg = format_message(ticker, result)
+                    msg = format_message(ticker, result, yahoo_price, yahoo_change)
                     await send_telegram(session, msg)
                     print(f"  📲 Alert sent!")
-
                     await asyncio.sleep(3)
 
                 except Exception as e:
                     print(f"  ❌ Error {ticker}: {e}")
                     continue
 
-            print(f"\n⏰ Waiting {ANALYSIS_INTERVAL//60} min for next cycle...")
+            print(f"\n⏰ Waiting {ANALYSIS_INTERVAL//60} min...")
             await asyncio.sleep(ANALYSIS_INTERVAL)
 
 if __name__ == "__main__":
