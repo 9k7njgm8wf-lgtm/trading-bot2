@@ -591,99 +591,109 @@ async def handle_cmds(session, offset):
     global bot_paused, watchlist, ACCOUNT_SIZE
     updates=await get_updates(session, offset+1)
     for update in updates:
-        offset=update["update_id"]
-        text=update.get("message",{}).get("text","").strip()
-        if not text: continue
-        print("CMD:",text)
-        if text=="/status":
-            al=", ".join([t+":"+v['signal']+"@$"+str(v['entry']) for t,v in active_trades.items()]) or "None"
-            lines=["Bot Status","",
-                   get_ny().strftime("%H:%M:%S")+" NY | "+market_status(),
-                   "Running" if not bot_paused else "PAUSED",
-                   "Watching: "+", ".join(watchlist),
-                   "Trades today: "+str(trades_today)+"/"+str(MAX_TRADES_PER_DAY),
-                   "Daily P&L: "+str(round(daily_pnl,2))+"%",
-                   "Losing streak: "+str(losing_streak),
-                   "Active: "+al]
-            await tg(session,"\n".join(lines))
-        elif text.startswith("/add "):
-            t=text.split()[1].upper()
-            if t not in watchlist: watchlist.append(t); await tg(session,"Added "+t+"! Watching: "+", ".join(watchlist))
-            else: await tg(session,t+" already watching")
-        elif text.startswith("/remove "):
-            t=text.split()[1].upper()
-            if t in watchlist: watchlist.remove(t); await tg(session,"Removed "+t)
-            else: await tg(session,t+" not found")
-        elif text=="/watchlist": await tg(session,"Watching: "+", ".join(watchlist)+"\n/add TICKER  /remove TICKER")
-        elif text=="/pause": bot_paused=True; await tg(session,"Bot paused. /resume to restart.")
-        elif text=="/resume": bot_paused=False; await tg(session,"Bot resumed!")
-        elif text=="/report": await daily_report(session)
-        elif text=="/weekly": await weekly_report(session)
-        elif text.startswith("/risk "):
-            try: ACCOUNT_SIZE=float(text.split()[1]); await tg(session,"Account: $"+str(ACCOUNT_SIZE))
-            except: await tg(session,"Usage: /risk 5000")
-        elif text.startswith("/alert "):
-            try:
-                parts=text.split(); t=parts[1].upper(); target=float(parts[2])
-                p,_,_=await yahoo_price(session,t)
-                direction="above" if p and target>p else "below"
-                if t not in price_alerts: price_alerts[t]=[]
-                price_alerts[t].append({"price":target,"direction":direction})
-                await tg(session,"Alert set! "+t+" "+direction+" $"+str(target)+" (now $"+str(p)+")")
-            except: await tg(session,"Usage: /alert RGTI 25.00")
-        elif text=="/alerts":
-            if not any(price_alerts.values()): await tg(session,"No alerts. /alert TICKER PRICE")
-            else:
-                lines=["Active Alerts:"]
-                for t,als in price_alerts.items():
-                    for a in als: lines.append(t+": "+a['direction']+" $"+str(a['price']))
+        try:
+            offset=update["update_id"]
+            text=update.get("message",{}).get("text","").strip()
+            if not text: continue
+            print("CMD:",text)
+            if text=="/status":
+                al=", ".join([t+":"+v["signal"]+"@$"+str(v["entry"]) for t,v in active_trades.items()]) or "None"
+                lines=["Bot Status","",get_ny().strftime("%H:%M:%S")+" NY | "+market_status(),
+                       "Running" if not bot_paused else "PAUSED","Watching: "+", ".join(watchlist),
+                       "Trades today: "+str(trades_today)+"/"+str(MAX_TRADES_PER_DAY),
+                       "Daily P&L: "+str(round(daily_pnl,2))+"%","Losing streak: "+str(losing_streak),"Active: "+al]
                 await tg(session,"\n".join(lines))
-        elif text=="/brief": await morning_brief(session)
-        elif text=="/scan": 
-            new_wl=await run_morning_scan(session)
-            watchlist.clear(); watchlist.extend(new_wl)
-        elif text.startswith("/backtest"):
-            parts=text.split()
-            tickers_bt=[parts[1].upper()] if len(parts)>1 else list(BASE_TICKERS)
-            await tg(session,"Backtesting "+", ".join(tickers_bt)+"...")
-            for t in tickers_bt:
-                bt=await run_backtest(session,t)
-                if bt:
-                    grade="GOOD" if bt['win_rate']>=55 else "OK" if bt['win_rate']>=45 else "POOR"
-                    ps="+" if bt['total_pnl']>=0 else ""; avgs="+" if bt['avg_pnl']>=0 else ""
-                    lines=["Backtest "+bt['ticker']+" - "+grade,
-                           "Win Rate: "+str(bt['win_rate'])+"%",
-                           "Trades: "+str(bt['total_trades'])+" | Wins: "+str(bt['wins'])+" | Losses: "+str(bt['losses']),
-                           "Avg P&L: "+avgs+str(bt['avg_pnl'])+"%",
-                           "Best: +"+str(bt['best'])+"% | Worst: "+str(bt['worst'])+"%",
-                           "Total P&L: "+ps+str(bt['total_pnl'])+"%"]
+            elif text.startswith("/add "):
+                t=text.split()[1].upper()
+                if t not in watchlist: watchlist.append(t); await tg(session,"Added "+t+"! Watching: "+", ".join(watchlist))
+                else: await tg(session,t+" already watching")
+            elif text.startswith("/remove "):
+                t=text.split()[1].upper()
+                if t in watchlist: watchlist.remove(t); await tg(session,"Removed "+t)
+                else: await tg(session,t+" not found")
+            elif text=="/watchlist":
+                await tg(session,"Watching: "+", ".join(watchlist)+"\n/add TICKER  /remove TICKER")
+            elif text=="/pause":
+                bot_paused=True; await tg(session,"Bot paused. /resume to restart.")
+            elif text=="/resume":
+                bot_paused=False; await tg(session,"Bot resumed!")
+            elif text=="/report":
+                await daily_report(session)
+            elif text=="/weekly":
+                await weekly_report(session)
+            elif text.startswith("/risk "):
+                try: ACCOUNT_SIZE=float(text.split()[1]); await tg(session,"Account: $"+str(ACCOUNT_SIZE))
+                except: await tg(session,"Usage: /risk 5000")
+            elif text.startswith("/alert "):
+                try:
+                    parts=text.split(); t=parts[1].upper(); target=float(parts[2])
+                    p,_,_=await yahoo_price(session,t)
+                    direction="above" if p and target>p else "below"
+                    if t not in price_alerts: price_alerts[t]=[]
+                    price_alerts[t].append({"price":target,"direction":direction})
+                    await tg(session,"Alert set! "+t+" "+direction+" $"+str(target)+" (now $"+str(p)+")")
+                except: await tg(session,"Usage: /alert RGTI 25.00")
+            elif text=="/alerts":
+                if not any(price_alerts.values()): await tg(session,"No alerts. /alert TICKER PRICE")
+                else:
+                    lines=["Active Alerts:"]
+                    for t,als in price_alerts.items():
+                        for a in als: lines.append(t+": "+a["direction"]+" $"+str(a["price"]))
                     await tg(session,"\n".join(lines))
-                else: await tg(session,"Not enough data for "+t)
-                await asyncio.sleep(1)
-        elif text=="/risk_status":
-            risk_pct,reduced=get_adjusted_risk()
-            can_trade,reason=check_daily_limits()
-            lines=["Risk Status","",
-                   "Account: $"+str(ACCOUNT_SIZE),
-                   "Risk/trade: "+str(risk_pct)+"%  $"+str(round(ACCOUNT_SIZE*risk_pct/100,2)),
-                   "Reduced size: "+("YES - losing streak!" if reduced else "No"),
-                   "Losing streak: "+str(losing_streak),
-                   "Daily P&L: "+str(round(daily_pnl,2))+"%",
-                   "Trades today: "+str(trades_today)+"/"+str(MAX_TRADES_PER_DAY),
-                   "Can trade: "+("YES" if can_trade else "NO - "+reason)]
-            await tg(session,"\n".join(lines))
-        elif text=="/help":
-            lines=["AlphaSignal Commands","",
-                   "/status - full status","/watchlist - tickers",
-                   "/add AAPL - add ticker","/remove RGTI - remove",
-                   "/scan - find best stocks today",
-                   "/alert RGTI 25.00 - price alert","/alerts - show alerts",
-                   "/pause - pause bot","/resume - resume",
-                   "/report - daily P&L","/weekly - weekly report",
-                   "/backtest - test strategy","/backtest RGTI - one stock",
-                   "/risk 5000 - set account size","/risk_status - risk info",
-                   "/brief - morning brief","/help - this menu"]
-            await tg(session,"\n".join(lines))
+            elif text=="/brief":
+                await morning_brief(session)
+            elif text=="/scan":
+                new_wl=await run_morning_scan(session)
+                watchlist.clear(); watchlist.extend(new_wl)
+            elif text.startswith("/backtest"):
+                parts=text.split()
+                tickers_bt=[parts[1].upper()] if len(parts)>1 else list(BASE_TICKERS)
+                await tg(session,"Backtesting "+", ".join(tickers_bt)+"...")
+                for t in tickers_bt:
+                    try:
+                        bt=await run_backtest(session,t)
+                        if bt:
+                            grade="GOOD" if bt["win_rate"]>=55 else "OK" if bt["win_rate"]>=45 else "POOR"
+                            ps="+" if bt["total_pnl"]>=0 else ""; avgs="+" if bt["avg_pnl"]>=0 else ""
+                            lines=["Backtest "+bt["ticker"]+" - "+grade,
+                                   "Win Rate: "+str(bt["win_rate"])+"%",
+                                   "Trades: "+str(bt["total_trades"])+" | Wins: "+str(bt["wins"])+" | Losses: "+str(bt["losses"]),
+                                   "Avg P&L: "+avgs+str(bt["avg_pnl"])+"%",
+                                   "Best: +"+str(bt["best"])+"% | Worst: "+str(bt["worst"])+"%",
+                                   "Total P&L: "+ps+str(bt["total_pnl"])+"%"]
+                            await tg(session,"\n".join(lines))
+                        else:
+                            await tg(session,"Not enough data for "+t)
+                    except Exception as bt_err:
+                        await tg(session,"Backtest error for "+t+": "+str(bt_err))
+                    await asyncio.sleep(1)
+            elif text=="/risk_status":
+                risk_pct,reduced=get_adjusted_risk()
+                can_trade,reason=check_daily_limits()
+                lines=["Risk Status","","Account: $"+str(ACCOUNT_SIZE),
+                       "Risk/trade: "+str(risk_pct)+"%  $"+str(round(ACCOUNT_SIZE*risk_pct/100,2)),
+                       "Reduced: "+("YES - losing streak!" if reduced else "No"),
+                       "Losing streak: "+str(losing_streak),
+                       "Daily P&L: "+str(round(daily_pnl,2))+"%",
+                       "Trades today: "+str(trades_today)+"/"+str(MAX_TRADES_PER_DAY),
+                       "Can trade: "+("YES" if can_trade else "NO - "+reason)]
+                await tg(session,"\n".join(lines))
+            elif text=="/help":
+                lines=["AlphaSignal Commands","",
+                       "/status - full status","/watchlist - tickers",
+                       "/add AAPL - add ticker","/remove RGTI - remove",
+                       "/scan - find best stocks today",
+                       "/alert RGTI 25.00 - price alert","/alerts - show alerts",
+                       "/pause - pause bot","/resume - resume",
+                       "/report - daily P&L","/weekly - weekly report",
+                       "/backtest - test all stocks","/backtest RGTI - one stock",
+                       "/risk 5000 - set account size","/risk_status - risk info",
+                       "/brief - morning brief","/help - this menu"]
+                await tg(session,"\n".join(lines))
+        except Exception as cmd_err:
+            print("Command error:",cmd_err)
+            try: await tg(session,"Command error: "+str(cmd_err)[:100])
+            except: pass
     return offset
 
 # ── MAIN ─────────────────────────────────────────────────
@@ -712,7 +722,10 @@ async def main():
         await tg(session,"\n".join(lines))
 
         while True:
-            last_update_id=await handle_cmds(session,last_update_id)
+            try:
+                last_update_id=await handle_cmds(session,last_update_id)
+            except Exception as e:
+                print("CMD handler error:",e)
             status=market_status(); ny=get_ny()
 
             # Reset daily at midnight
