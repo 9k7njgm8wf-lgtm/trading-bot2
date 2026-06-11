@@ -361,12 +361,42 @@ async def ai_confirm(session, ticker, result, patterns, sentiment, divergence, t
         return {"verdict":"CONFIRMED","reason":"AI unavailable","tip":"Use your judgment"}
 
 # ── BACKTEST ─────────────────────────────────────────────
+async def get_yahoo_bars(session, ticker, days=35):
+    """Get historical daily bars from Yahoo Finance for backtesting"""
+    try:
+        import time
+        end = int(time.time())
+        start = end - (days * 24 * 60 * 60)
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/"+ticker
+        params = {"interval":"1d","period1":str(start),"period2":str(end)}
+        headers = {"User-Agent":"Mozilla/5.0"}
+        async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            data = await r.json()
+            result = data["chart"]["result"][0]
+            timestamps = result["timestamp"]
+            ohlcv = result["indicators"]["quote"][0]
+            bars = []
+            for i in range(len(timestamps)):
+                try:
+                    bars.append({
+                        "o": ohlcv["open"][i] or 0,
+                        "h": ohlcv["high"][i] or 0,
+                        "l": ohlcv["low"][i] or 0,
+                        "c": ohlcv["close"][i] or 0,
+                        "v": ohlcv["volume"][i] or 0,
+                    })
+                except: continue
+            return [b for b in bars if b["c"] > 0]
+    except Exception as e:
+        print("Yahoo bars error "+ticker+":", e)
+        return []
+
 async def run_backtest(session, ticker):
-    bars=await get_bars(session,ticker,"1Day",35)
-    if len(bars)<15: return None
+    bars = await get_yahoo_bars(session, ticker, 35)
+    if not bars or len(bars)<15: return None
     wins=losses=0; total_pnl=0; trades=[]
     for i in range(14,len(bars)-1):
-        seg=bars[max(0,i-20):i+1]; closes=[b['c'] for b in seg]; price=closes[-1]
+        seg=bars[max(0,i-20):i+1]; closes=[b["c"] for b in seg]; price=closes[-1]
         ema9=calc_ema(closes,9); ema21=calc_ema(closes,21); rsi=calc_rsi(closes)
         vwap=calc_vwap(seg)[-1]; atr=calc_atr(seg)
         if not all([ema9,ema21,rsi,atr]): continue
@@ -374,7 +404,7 @@ async def run_backtest(session, ticker):
         elif ema9<ema21 and rsi>50 and price<vwap: signal="SELL"
         else: continue
         nb=bars[i+1]
-        pnl=round((nb['c']-price)/price*100,2) if signal=="BUY" else round((price-nb['c'])/price*100,2)
+        pnl=round((nb["c"]-price)/price*100,2) if signal=="BUY" else round((price-nb["c"])/price*100,2)
         if pnl>0: wins+=1
         else: losses+=1
         total_pnl+=pnl; trades.append(pnl)
