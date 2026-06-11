@@ -361,32 +361,31 @@ async def ai_confirm(session, ticker, result, patterns, sentiment, divergence, t
         return {"verdict":"CONFIRMED","reason":"AI unavailable","tip":"Use your judgment"}
 
 # ── BACKTEST ─────────────────────────────────────────────
-async def get_yahoo_bars(session, ticker, days=35):
+async def get_yahoo_bars(session, ticker, days=90):
     """Get historical daily bars from Yahoo Finance for backtesting"""
     try:
         import time
         end = int(time.time())
         start = end - (days * 24 * 60 * 60)
         url = "https://query1.finance.yahoo.com/v8/finance/chart/"+ticker
-        params = {"interval":"1d","period1":str(start),"period2":str(end)}
-        headers = {"User-Agent":"Mozilla/5.0"}
-        async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
+        params = {"interval":"1d","period1":str(start),"period2":str(end),"range":"3mo"}
+        headers = {"User-Agent":"Mozilla/5.0","Accept":"application/json"}
+        async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
             data = await r.json()
             result = data["chart"]["result"][0]
-            timestamps = result["timestamp"]
+            timestamps = result.get("timestamp",[])
             ohlcv = result["indicators"]["quote"][0]
             bars = []
             for i in range(len(timestamps)):
                 try:
-                    bars.append({
-                        "o": ohlcv["open"][i] or 0,
-                        "h": ohlcv["high"][i] or 0,
-                        "l": ohlcv["low"][i] or 0,
-                        "c": ohlcv["close"][i] or 0,
-                        "v": ohlcv["volume"][i] or 0,
-                    })
+                    o=ohlcv["open"][i]; h=ohlcv["high"][i]
+                    l=ohlcv["low"][i];  c=ohlcv["close"][i]
+                    v=ohlcv["volume"][i]
+                    if all([o,h,l,c,v]):
+                        bars.append({"o":round(o,4),"h":round(h,4),"l":round(l,4),"c":round(c,4),"v":int(v)})
                 except: continue
-            return [b for b in bars if b["c"] > 0]
+            print("Yahoo bars "+ticker+": "+str(len(bars))+" bars")
+            return bars
     except Exception as e:
         print("Yahoo bars error "+ticker+":", e)
         return []
