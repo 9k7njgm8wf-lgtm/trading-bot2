@@ -879,13 +879,27 @@ async def run_morning_scan(session):
             await asyncio.sleep(0.3)
         except: continue
     candidates.sort(key=lambda x:x['score'],reverse=True)
-    top5=candidates[:5]; scanner_tickers=[c['ticker'] for c in top5]
-    lines=["Morning Scan Complete! Top 5 stocks today:",""]
+
+    # If no high-score candidates, lower threshold and take best available
+    if not candidates:
+        await tg(session,"Scanner: No high-volatility stocks found today. Using base watchlist.")
+        return list(BASE_TICKERS)
+
+    top5 = candidates[:5]
+    scanner_tickers = [c['ticker'] for c in top5]
+
+    lines = ["Morning Scan Complete! Top picks today:",""]
     for i,c in enumerate(top5,1):
-        lines.append(str(i)+". "+c['ticker']+" $"+str(c['price'])+" "+("+" if c['change']>=0 else "")+str(c['change'])+"% RVOL:"+str(c['rvol'])+"x Score:"+str(c['score']))
-    lines+=["","Added to watchlist!"]
+        sign = "+" if c['change']>=0 else ""
+        lines.append(str(i)+". "+c['ticker'])
+        lines.append("   Price: $"+str(c['price'])+" "+sign+str(c['change'])+"%")
+        lines.append("   RVOL: "+str(c['rvol'])+"x  ATR: "+str(c['atr_pct'])+"%  Score: "+str(c['score']))
+        lines.append("")
+
+    full_list = list(set(BASE_TICKERS + scanner_tickers))
+    lines.append("Watching today: "+", ".join(full_list))
     await tg(session,"\n".join(lines))
-    return list(set(BASE_TICKERS+scanner_tickers))
+    return full_list
 
 # ── REPORTS ──────────────────────────────────────────────
 async def morning_brief(session):
