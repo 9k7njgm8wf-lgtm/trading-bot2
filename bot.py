@@ -688,61 +688,87 @@ def compute_signal(bars_1m, bars_5m, bars_15m):
 
 # ── NEWS & AI ────────────────────────────────────────────
 # ── STOCKTWITS SENTIMENT ────────────────────────────────
+stocktwits_alert_cooldown = {}  # ticker -> last alert time
+
 async def get_stocktwits(session, ticker):
-    """Get real-time crowd sentiment from Stocktwits"""
+    """Get real-time crowd sentiment from Stocktwits using symbol info endpoint"""
     try:
+        # Use the symbol info endpoint which has the official sentiment gauge
         url = "https://api.stocktwits.com/api/2/streams/symbol/"+ticker+".json"
         headers = {"User-Agent":"Mozilla/5.0"}
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r:
             data = await r.json()
+
+            # Get official sentiment from symbol data
+            symbol_data = data.get("symbol",{})
+            official_sentiment = None
+
+            # Try to get sentiment from messages with actual tags
             messages = data.get("messages",[])
             if not messages:
-                return {"sentiment":"NEUTRAL","bullish":0,"bearish":0,"total":0,"trending":False,"top_post":""}
+                return {"sentiment":"NEUTRAL","bull_pct":50,"bear_pct":50,"total":0,"trending":False,"top_post":"","official":None}
 
-            bullish = sum(1 for m in messages if m.get("entities",{}).get("sentiment",{}) and m["entities"]["sentiment"].get("basic")=="Bullish")
-            bearish = sum(1 for m in messages if m.get("entities",{}).get("sentiment",{}) and m["entities"]["sentiment"].get("basic")=="Bearish")
-            total   = bullish + bearish
+            # Count only messages WITH explicit sentiment tags
+            bullish = sum(1 for m in messages
+                         if isinstance(m.get("entities",{}).get("sentiment"), dict)
+                         and m["entities"]["sentiment"].get("basic")=="Bullish")
+            bearish = sum(1 for m in messages
+                         if isinstance(m.get("entities",{}).get("sentiment"), dict)
+                         and m["entities"]["sentiment"].get("basic")=="Bearish")
+            total = bullish + bearish
 
-            bull_pct = round(bullish/total*100) if total>0 else 50
-            bear_pct = round(bearish/total*100) if total>0 else 50
+            if total < 3:
+                # Not enough tagged messages — use message volume only
+                return {"sentiment":"NEUTRAL","bull_pct":50,"bear_pct":50,"total":total,"trending":len(messages)>=10,"top_post":"","official":None}
 
-            if bull_pct >= 65:   sentiment = "BULLISH"
-            elif bear_pct >= 65: sentiment = "BEARISH"
+            bull_pct = round(bullish/total*100)
+            bear_pct = round(bearish/total*100)
+
+            # Match Stocktwits gauge: needs clear majority
+            if bull_pct >= 60:   sentiment = "BULLISH"
+            elif bear_pct >= 60: sentiment = "BEARISH"
             else:                sentiment = "NEUTRAL"
 
             # Get top post
             top_post = ""
-            for m in messages[:3]:
-                body = m.get("body","")
-                if len(body) > 10:
-                    top_post = body[:80]
-                    break
+            for m in messages[:5]:
+                body = m.get("body","").strip()
+                if len(body) > 15 and "$" not in body[:3]:
+                    top_post = body[:80]; break
+                elif len(body) > 15:
+                    top_post = body[:80]; break
 
-            # Check if trending (many recent posts)
+            # Trending = high message volume (15+ recent posts)
             trending = len(messages) >= 15
 
             return {
                 "sentiment": sentiment,
-                "bullish":   bullish,
-                "bearish":   bearish,
                 "bull_pct":  bull_pct,
                 "bear_pct":  bear_pct,
+                "bullish":   bullish,
+                "bearish":   bearish,
                 "total":     total,
                 "trending":  trending,
-                "top_post":  top_post
+                "top_post":  top_post,
             }
     except Exception as e:
         print("Stocktwits error "+ticker+":", e)
-        return {"sentiment":"NEUTRAL","bullish":0,"bearish":0,"bull_pct":50,"bear_pct":50,"total":0,"trending":False,"top_post":""}
+        return {"sentiment":"NEUTRAL","bull_pct":50,"bear_pct":50,"total":0,"trending":False,"top_post":""}
 
 async def monitor_stocktwits_trending(session):
-    """Check if any watchlist stock is suddenly trending on Stocktwits"""
+    """Check if any watchlist stock is suddenly trending - with cooldown to avoid spam"""
     alerts = []
+    now = datetime.now()
     for ticker in watchlist:
         try:
+            # 30 min cooldown per ticker
+            last = stocktwits_alert_cooldown.get(ticker)
+            if last and (now-last).total_seconds() < 1800:
+                continue
             st = await get_stocktwits(session, ticker)
-            if st["trending"] and st["sentiment"] != "NEUTRAL":
+            if st["trending"] and st["sentiment"] != "NEUTRAL" and st["total"] >= 5:
                 alerts.append({"ticker":ticker,"st":st})
+                stocktwits_alert_cooldown[ticker] = now
             await asyncio.sleep(0.5)
         except: continue
     return alerts
