@@ -687,6 +687,66 @@ def compute_signal(bars_1m, bars_5m, bars_15m):
     }
 
 # ── NEWS & AI ────────────────────────────────────────────
+# ── STOCKTWITS SENTIMENT ────────────────────────────────
+async def get_stocktwits(session, ticker):
+    """Get real-time crowd sentiment from Stocktwits"""
+    try:
+        url = "https://api.stocktwits.com/api/2/streams/symbol/"+ticker+".json"
+        headers = {"User-Agent":"Mozilla/5.0"}
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r:
+            data = await r.json()
+            messages = data.get("messages",[])
+            if not messages:
+                return {"sentiment":"NEUTRAL","bullish":0,"bearish":0,"total":0,"trending":False,"top_post":""}
+
+            bullish = sum(1 for m in messages if m.get("entities",{}).get("sentiment",{}) and m["entities"]["sentiment"].get("basic")=="Bullish")
+            bearish = sum(1 for m in messages if m.get("entities",{}).get("sentiment",{}) and m["entities"]["sentiment"].get("basic")=="Bearish")
+            total   = bullish + bearish
+
+            bull_pct = round(bullish/total*100) if total>0 else 50
+            bear_pct = round(bearish/total*100) if total>0 else 50
+
+            if bull_pct >= 65:   sentiment = "BULLISH"
+            elif bear_pct >= 65: sentiment = "BEARISH"
+            else:                sentiment = "NEUTRAL"
+
+            # Get top post
+            top_post = ""
+            for m in messages[:3]:
+                body = m.get("body","")
+                if len(body) > 10:
+                    top_post = body[:80]
+                    break
+
+            # Check if trending (many recent posts)
+            trending = len(messages) >= 15
+
+            return {
+                "sentiment": sentiment,
+                "bullish":   bullish,
+                "bearish":   bearish,
+                "bull_pct":  bull_pct,
+                "bear_pct":  bear_pct,
+                "total":     total,
+                "trending":  trending,
+                "top_post":  top_post
+            }
+    except Exception as e:
+        print("Stocktwits error "+ticker+":", e)
+        return {"sentiment":"NEUTRAL","bullish":0,"bearish":0,"bull_pct":50,"bear_pct":50,"total":0,"trending":False,"top_post":""}
+
+async def monitor_stocktwits_trending(session):
+    """Check if any watchlist stock is suddenly trending on Stocktwits"""
+    alerts = []
+    for ticker in watchlist:
+        try:
+            st = await get_stocktwits(session, ticker)
+            if st["trending"] and st["sentiment"] != "NEUTRAL":
+                alerts.append({"ticker":ticker,"st":st})
+            await asyncio.sleep(0.5)
+        except: continue
+    return alerts
+
 async def get_news(session, ticker):
     try:
         async with session.get("https://query1.finance.yahoo.com/v1/finance/search",
@@ -735,7 +795,7 @@ async def ai_confirm(session, ticker, result, patterns, sentiment, tf_agrees):
         return {"verdict":"CONFIRMED","reason":"AI unavailable","tip":"Use your judgment"}
 
 # ── FORMAT MESSAGE ───────────────────────────────────────
-def build_msg(ticker, result, yp, yc, status, sentiment, headlines, patterns, ai, rvol, multiday, spy_trend, spy_chg, tf_agrees, orb_tag, shares, cost, risk_pct, reduced):
+def build_msg(ticker, result, yp, yc, status, sentiment, headlines, patterns, ai, rvol, multiday, spy_trend, spy_chg, tf_agrees, orb_tag, shares, cost, risk_pct, reduced, st_data=None):
     sig=result["signal"]; now=get_ny().strftime("%H:%M:%S")+" NY"
     score=result['buy_score'] if sig=="BUY" else result['sell_score']
     verdict=ai.get("verdict","CONFIRMED")
@@ -798,6 +858,20 @@ def build_msg(ticker, result, yp, yc, status, sentiment, headlines, patterns, ai
         "Patterns: "+(", ".join(patterns) if patterns else "None"),
         "News: "+sentiment+(" - "+headlines[0][:50] if headlines else ""),
         "",
+    ]
+
+    # Stocktwits section
+    if st_data and st_data.get("total",0) > 0:
+        st_sent = st_data["sentiment"]
+        st_emoji = "🟢" if st_sent=="BULLISH" else "🔴" if st_sent=="BEARISH" else "🟡"
+        trend_tag = " TRENDING 🔥" if st_data.get("trending") else ""
+        lines.append("Stocktwits"+trend_tag+":")
+        lines.append("  "+st_emoji+" "+st_sent+" | Bulls: "+str(st_data["bull_pct"])+"% Bears: "+str(st_data["bear_pct"])+"% ("+str(st_data["total"])+" votes)")
+        if st_data.get("top_post"):
+            lines.append("  Top: \""+st_data["top_post"]+"\"")
+        lines.append("")
+
+    lines+=[
         "S: $"+str(result['support'])+"  R: $"+str(result['resistance']),
         now
     ]
@@ -1007,6 +1081,11 @@ async def handle_cmds(session, offset):
                 if t in watchlist: watchlist.remove(t); await tg(session,"Removed "+t)
                 else: await tg(session,t+" not found")
             elif text=="/watchlist": await tg(session,"Watching: "+", ".join(watchlist))
+            elif text=="/clear":
+                count = len(active_trades)
+                active_trades.clear()
+                trailing_stops.clear()
+                await tg(session,"Cleared "+str(count)+" ghost trade(s). Fresh start!")
             elif text=="/pause": bot_paused=True; await tg(session,"Bot paused. /resume to restart.")
             elif text=="/resume": bot_paused=False; await tg(session,"Bot resumed!")
             elif text=="/report": await daily_report(session)
@@ -1120,6 +1199,13 @@ async def main():
             status=market_status(); ny=get_ny()
 
             if ny.hour==0 and ny.minute==0: reset_daily_stats()
+
+            # Reset active trades at market close
+            if ny.hour==16 and ny.minute==1:
+                if active_trades:
+                    await tg(session,"Market closed. Clearing "+str(len(active_trades))+" open trade(s): "+", ".join(active_trades.keys()))
+                    active_trades.clear()
+                    trailing_stops.clear()
             if ny.hour==9 and ny.minute==20 and ny.weekday()<5 and ny.day!=last_scan_day:
                 try:
                     new_wl=await run_morning_scan(session)
@@ -1145,6 +1231,21 @@ async def main():
                 if active_trades: await check_trailing(session)
                 if price_alerts:  await check_alerts(session)
             except Exception as e: print("Trailing/alerts err:",e)
+
+            # Stocktwits trending alerts (every 5 min)
+            try:
+                ny_min = get_ny().minute
+                if ny_min % 5 == 0 and status == "OPEN":
+                    trending = await monitor_stocktwits_trending(session)
+                    for t in trending:
+                        st = t["st"]
+                        se = "🟢" if st["sentiment"]=="BULLISH" else "🔴"
+                        msg = ("STOCKTWITS TRENDING ALERT\n\n"+
+                               se+" "+t["ticker"]+" is TRENDING on Stocktwits!\n"+
+                               "Sentiment: "+st["sentiment"]+" | "+str(st["bull_pct"])+"% Bulls"+
+                               ("\nTop post: \""+st["top_post"]+"\"" if st["top_post"] else ""))
+                        await tg(session, msg)
+            except Exception as e: print("Stocktwits monitor err:",e)
 
             print("["+ny.strftime("%H:%M:%S")+" NY]",status,"|",watchlist)
 
@@ -1181,6 +1282,12 @@ async def main():
                     orb_tag=check_orb(ticker,result["entry"]) or ""
                     patterns=detect_patterns(bars_5m)
                     sentiment,headlines=await get_news(session,ticker)
+                    st_data=await get_stocktwits(session,ticker)
+
+                    # Block BUY if Stocktwits strongly bearish
+                    if st_data["sentiment"]=="BEARISH" and st_data["bear_pct"]>=70 and result["signal"]=="BUY":
+                        await tg(session,"BUY blocked - Stocktwits "+str(st_data["bear_pct"])+"% BEARISH on "+ticker)
+                        continue
 
                     if sentiment=="NEGATIVE" and result["signal"]=="BUY":
                         await tg(session,"BUY blocked - negative news: "+ticker); continue
@@ -1202,7 +1309,7 @@ async def main():
                           "Sweep:"+str(result.get('liq_sweep')))
 
                     msg=build_msg(ticker,result,yp,yc,status,sentiment,headlines,patterns,ai,
-                                  rvol,multiday,spy_trend,spy_chg,tf_agrees,orb_tag,shares,cost,risk_pct,reduced)
+                                  rvol,multiday,spy_trend,spy_chg,tf_agrees,orb_tag,shares,cost,risk_pct,reduced,st_data)
                     await tg(session,msg)
 
                     active_trades[ticker]={"signal":result["signal"],"entry":result["entry"],
