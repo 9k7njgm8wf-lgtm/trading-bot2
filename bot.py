@@ -107,6 +107,22 @@ async def yahoo_price(session, ticker):
             return round(price,4), round(((price-prev)/prev)*100,2), vol
     except: return None,None,None
 
+async def get_alpaca_price(session, ticker):
+    """Get real-time price from Alpaca SIP feed"""
+    try:
+        url = ALPACA_BASE+"/stocks/"+ticker+"/trades/latest"
+        async with session.get(url, headers=ALPACA_HEADERS,
+            params={"feed":"sip"}, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            data = await r.json()
+            trade = data.get("trade",{})
+            price = trade.get("p")
+            if price:
+                return round(price, 4)
+            return None
+    except Exception as e:
+        print("Alpaca price error "+ticker+":", e)
+        return None
+
 async def get_spy_trend(session):
     p,c,_ = await yahoo_price(session,"SPY")
     if p is None: return "NEUTRAL",0,0
@@ -756,19 +772,28 @@ async def get_stocktwits(session, ticker):
         return {"sentiment":"NEUTRAL","bull_pct":50,"bear_pct":50,"total":0,"trending":False,"top_post":""}
 
 async def monitor_stocktwits_trending(session):
-    """Check if any watchlist stock is suddenly trending - with cooldown to avoid spam"""
+    """Check stocktwits - only alert ONCE per stock per hour, max 1 alert per run"""
     alerts = []
-    now = datetime.now()
+    now = get_ny()
+    # Only run at specific minutes to avoid constant spam
+    # Run at :00 and :30 only
+    if now.minute % 30 != 0:
+        return alerts
     for ticker in watchlist:
         try:
-            # 30 min cooldown per ticker
+            # 60 min cooldown per ticker
             last = stocktwits_alert_cooldown.get(ticker)
-            if last and (now-last).total_seconds() < 1800:
-                continue
+            if last:
+                last_ny = last
+                if (now - last_ny).total_seconds() < 3600:
+                    continue
             st = await get_stocktwits(session, ticker)
-            if st["trending"] and st["sentiment"] != "NEUTRAL" and st["total"] >= 5:
-                alerts.append({"ticker":ticker,"st":st})
-                stocktwits_alert_cooldown[ticker] = now
+            # Only alert if strongly bullish/bearish with enough votes
+            if st["trending"] and st["sentiment"] != "NEUTRAL" and st["total"] >= 8:
+                if (st["bull_pct"] >= 70 or st["bear_pct"] >= 70):
+                    alerts.append({"ticker":ticker,"st":st})
+                    stocktwits_alert_cooldown[ticker] = now
+                    break  # Only 1 alert per scan max
             await asyncio.sleep(0.5)
         except: continue
     return alerts
@@ -909,7 +934,10 @@ async def check_trailing(session):
     for ticker in list(active_trades.keys()):
         try:
             trade=active_trades[ticker]
-            yp,_,_=await yahoo_price(session,ticker)
+            # Use Alpaca SIP for real-time trailing stop
+            yp = await get_alpaca_price(session,ticker)
+            if not yp:
+                yp,_,_ = await yahoo_price(session,ticker)
             if not yp: continue
             entry=trade["entry"]; sig=trade["signal"]; atr=trade.get("atr",abs(entry-trade["sl"]))
             if sig=="BUY":
@@ -1014,8 +1042,15 @@ async def morning_brief(session):
     if vp: lines.append("  VIX $"+str(vp)+" "+("HIGH FEAR" if vp>25 else "ELEVATED" if vp>18 else "CALM"))
     lines+=["","Watchlist:"]
     for t in watchlist:
-        p,c,_=await yahoo_price(session,t)
-        if p: lines.append("  "+t+": $"+str(p)+" "+("+" if c>=0 else "")+str(c)+"%")
+        # Try Alpaca SIP first (real-time), fall back to Yahoo
+        ap = await get_alpaca_price(session, t)
+        p,c,_ = await yahoo_price(session,t)
+        display_price = ap if ap else p
+        if display_price:
+            price_str = "  "+t+": $"+str(display_price)
+            if ap: price_str += " (LIVE)"
+            if c: price_str += " "+("+" if c>=0 else "")+str(c)+"%"
+            lines.append(price_str)
         await asyncio.sleep(0.3)
     lines+=["","SMC Strategy Active!","Market opens in ~5 min!"]
     await tg(session,"\n".join(lines))
@@ -1258,10 +1293,10 @@ async def main():
                 if price_alerts:  await check_alerts(session)
             except Exception as e: print("Trailing/alerts err:",e)
 
-            # Stocktwits trending alerts (every 5 min)
+            # Stocktwits trending alerts (every 30 min only)
             try:
                 ny_min = get_ny().minute
-                if ny_min % 5 == 0 and status == "OPEN":
+                if ny_min % 30 == 0 and status == "OPEN":
                     trending = await monitor_stocktwits_trending(session)
                     for t in trending:
                         st = t["st"]
@@ -1326,7 +1361,11 @@ async def main():
                     if ai.get("verdict")=="REJECTED":
                         await tg(session,"AI REJECTED "+ticker+" "+result["signal"]+": "+ai.get("reason","")); continue
 
-                    yp,yc,_=await yahoo_price(session,ticker)
+                    # Use Alpaca SIP for real-time price in message
+                    alpaca_live_price = await get_alpaca_price(session, ticker)
+                    yp_yahoo,yc,_ = await yahoo_price(session,ticker)
+                    # Use Alpaca price if available (real-time), fall back to Yahoo
+                    yp = alpaca_live_price if alpaca_live_price else yp_yahoo
                     shares,cost,risk_pct,reduced=calc_position(result['entry'],result['sl'])
                     score=result['buy_score'] if result['signal']=='BUY' else result['sell_score']
                     print("    SIGNAL:",result['signal'],"Score:"+str(score)+"/20","TF:"+str(tf_agrees)+"/3",
