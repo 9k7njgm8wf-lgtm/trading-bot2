@@ -15,7 +15,7 @@ TELEGRAM_CHAT_ID = "6903579390"
 
 BASE_TICKERS       = ["RGTI", "RXT", "QUBT", "LUNR"]
 SCAN_INTERVAL      = 60
-SIGNAL_COOLDOWN    = 900
+SIGNAL_COOLDOWN    = 1800  # 30 min cooldown prevents duplicate signals
 MIN_SCORE          = 7
 ACCOUNT_SIZE       = 1000
 RISK_PCT           = 2
@@ -1319,6 +1319,10 @@ async def main():
     global last_update_id, morning_brief_sent, trades_today, watchlist, last_scan_day, weekly_report_sent
     print("AlphaSignal SMC ULTIMATE starting...")
     last_report_day=-1
+
+    # Wait 10 seconds before sending startup message
+    # prevents duplicate messages during Railway redeploy
+    await asyncio.sleep(10)
 
     async with aiohttp.ClientSession() as session:
         lines=["AlphaSignal SMC ULTIMATE Bot!","",
