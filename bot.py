@@ -129,61 +129,49 @@ async def get_alpaca_price(session, ticker):
         print("Alpaca price error "+ticker+":", e)
         return None
 
-# ── FINNHUB WEBSOCKET ────────────────────────────────────
+# ── FINNHUB REST API ─────────────────────────────────────
+async def get_finnhub_price(session, ticker):
+    """Get real-time quote from Finnhub REST API (free tier)"""
+    try:
+        url = "https://finnhub.io/api/v1/quote"
+        params = {"symbol": ticker, "token": FINNHUB_API_KEY}
+        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            data = await r.json()
+            price = data.get("c", 0)
+            if price and price > 0:
+                return round(price, 4)
+            return None
+    except Exception as e:
+        print("Finnhub error "+ticker+":", e)
+        return None
+
 async def finnhub_websocket():
-    """Connect to Finnhub WebSocket for true real-time tick prices"""
-    global finnhub_prices, finnhub_connected
-    import websockets
-
-    uri = "wss://ws.finnhub.io?token="+FINNHUB_API_KEY
-
-    while True:
-        try:
-            print("Connecting to Finnhub WebSocket...")
-            async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
-                finnhub_connected = True
-                print("Finnhub WebSocket connected!")
-
-                # Subscribe to all watchlist tickers
-                for ticker in watchlist:
-                    sub_msg = json.dumps({"type":"subscribe","symbol":ticker})
-                    await ws.send(sub_msg)
-                    print("Subscribed to", ticker)
-
-                # Listen for price updates
-                async for message in ws:
+    """Poll Finnhub REST every 10 seconds (free tier compatible)"""
+    global finnhub_connected
+    print("Finnhub REST poller starting...")
+    finnhub_connected = True
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                for ticker in list(watchlist):
                     try:
-                        data = json.loads(message)
-                        if data.get("type") == "trade":
-                            for trade in data.get("data", []):
-                                symbol = trade.get("s","")
-                                price  = trade.get("p", 0)
-                                if symbol and price:
-                                    finnhub_prices[symbol] = round(price, 4)
-                        elif data.get("type") == "ping":
-                            await ws.send(json.dumps({"type":"pong"}))
-                    except Exception as e:
-                        print("Finnhub parse error:", e)
-                        continue
-
-        except Exception as e:
-            finnhub_connected = False
-            print("Finnhub WebSocket error:", e)
-            print("Reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
+                        price = await get_finnhub_price(session, ticker)
+                        if price:
+                            finnhub_prices[ticker] = price
+                            print("Finnhub", ticker, "$"+str(price))
+                    except: pass
+                    await asyncio.sleep(2)
+            except Exception as e:
+                print("Finnhub poller error:", e)
+            await asyncio.sleep(10)
 
 async def get_realtime_price(session, ticker):
-    """Get the most real-time price available — Finnhub first, then Alpaca, then Yahoo"""
-    # 1. Try Finnhub WebSocket (fastest - milliseconds)
+    """Get most real-time price: Finnhub > Alpaca SIP > Yahoo"""
     if ticker in finnhub_prices and finnhub_prices[ticker] > 0:
         return finnhub_prices[ticker], "FINNHUB-LIVE"
-
-    # 2. Try Alpaca SIP (fast - ~100ms)
     alpaca_p = await get_alpaca_price(session, ticker)
     if alpaca_p:
         return alpaca_p, "ALPACA-SIP"
-
-    # 3. Fall back to Yahoo (delayed)
     yp,_,_ = await yahoo_price(session, ticker)
     return yp, "YAHOO-DELAYED"
 
