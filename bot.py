@@ -30,9 +30,10 @@ REQUIRE_3TF_AGREE  = True
 ALPACA_BASE    = "https://data.alpaca.markets/v2"
 ALPACA_HEADERS = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_SECRET}
 
-# ── FINNHUB REAL-TIME PRICE CACHE ────────────────────────
-finnhub_prices    = {}   # ticker -> latest price
-finnhub_connected = False
+# ── ALPACA WEBSOCKET PRICE CACHE ─────────────────────────
+finnhub_prices      = {}     # kept for compatibility
+alpaca_ws_prices    = {}     # ticker -> latest WS price
+alpaca_ws_connected = False
 
 # ── STATE ─────────────────────────────────────────────────
 last_signal_time   = {}
@@ -129,49 +130,84 @@ async def get_alpaca_price(session, ticker):
         print("Alpaca price error "+ticker+":", e)
         return None
 
-# ── FINNHUB REST API ─────────────────────────────────────
-async def get_finnhub_price(session, ticker):
-    """Get real-time quote from Finnhub REST API (free tier)"""
-    try:
-        url = "https://finnhub.io/api/v1/quote"
-        params = {"symbol": ticker, "token": FINNHUB_API_KEY}
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as r:
-            data = await r.json()
-            price = data.get("c", 0)
-            if price and price > 0:
-                return round(price, 4)
-            return None
-    except Exception as e:
-        print("Finnhub error "+ticker+":", e)
-        return None
+# ── ALPACA WEBSOCKET (TRUE REAL-TIME) ────────────────────
+alpaca_ws_prices  = {}   # ticker -> latest trade price
+alpaca_ws_connected = False
+
+async def alpaca_websocket():
+    """Connect to Alpaca WebSocket for true real-time tick-by-tick prices"""
+    global alpaca_ws_prices, alpaca_ws_connected
+    import websockets
+
+    uri = "wss://stream.data.alpaca.markets/v2/sip"
+
+    while True:
+        try:
+            print("Connecting to Alpaca WebSocket...")
+            async with websockets.connect(uri,
+                extra_headers={
+                    "APCA-API-KEY-ID": ALPACA_API_KEY,
+                    "APCA-API-SECRET-KEY": ALPACA_SECRET
+                },
+                ping_interval=30,
+                ping_timeout=10
+            ) as ws:
+                # Authenticate
+                auth_msg = json.dumps({
+                    "action": "auth",
+                    "key": ALPACA_API_KEY,
+                    "secret": ALPACA_SECRET
+                })
+                await ws.send(auth_msg)
+                response = await ws.recv()
+                print("Alpaca WS auth:", response[:100])
+
+                # Subscribe to trades for all tickers
+                sub_msg = json.dumps({
+                    "action": "subscribe",
+                    "trades": list(watchlist)
+                })
+                await ws.send(sub_msg)
+                print("Alpaca WS subscribed to:", watchlist)
+                alpaca_ws_connected = True
+
+                # Listen for real-time trades
+                async for message in ws:
+                    try:
+                        data = json.loads(message)
+                        if isinstance(data, list):
+                            for msg in data:
+                                if msg.get("T") == "t":  # trade message
+                                    symbol = msg.get("S","")
+                                    price  = msg.get("p", 0)
+                                    if symbol and price:
+                                        alpaca_ws_prices[symbol] = round(price, 4)
+                    except Exception as e:
+                        print("Alpaca WS parse error:", e)
+                        continue
+
+        except Exception as e:
+            alpaca_ws_connected = False
+            print("Alpaca WebSocket error:", e)
+            print("Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
 
 async def finnhub_websocket():
-    """Poll Finnhub REST every 10 seconds (free tier compatible)"""
-    global finnhub_connected
-    print("Finnhub REST poller starting...")
-    finnhub_connected = True
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                for ticker in list(watchlist):
-                    try:
-                        price = await get_finnhub_price(session, ticker)
-                        if price:
-                            finnhub_prices[ticker] = price
-                            print("Finnhub", ticker, "$"+str(price))
-                    except: pass
-                    await asyncio.sleep(2)
-            except Exception as e:
-                print("Finnhub poller error:", e)
-            await asyncio.sleep(10)
+    """Alias — runs Alpaca WebSocket instead"""
+    await alpaca_websocket()
 
 async def get_realtime_price(session, ticker):
-    """Get most real-time price: Finnhub > Alpaca SIP > Yahoo"""
-    if ticker in finnhub_prices and finnhub_prices[ticker] > 0:
-        return finnhub_prices[ticker], "FINNHUB-LIVE"
+    """Get most real-time price: Alpaca WS > Alpaca REST > Yahoo"""
+    # 1. Alpaca WebSocket (milliseconds - true real-time)
+    if ticker in alpaca_ws_prices and alpaca_ws_prices[ticker] > 0:
+        return alpaca_ws_prices[ticker], "ALPACA-WS-LIVE"
+
+    # 2. Alpaca REST SIP (~100ms)
     alpaca_p = await get_alpaca_price(session, ticker)
     if alpaca_p:
         return alpaca_p, "ALPACA-SIP"
+
+    # 3. Yahoo fallback
     yp,_,_ = await yahoo_price(session, ticker)
     return yp, "YAHOO-DELAYED"
 
@@ -1299,7 +1335,7 @@ async def main():
                "PLUS: VWAP+RSI+EMA+ATR+BB+ORB",
                "AI: Groq LLaMA 3.3",
                "Min Score: "+str(MIN_SCORE)+"/20",
-               "Real-time SIP data","",
+               "Real-time: Alpaca WebSocket (tick-by-tick)","",
                "/help for all commands","/smc for SMC details"]
         await tg(session,"\n".join(lines))
 
