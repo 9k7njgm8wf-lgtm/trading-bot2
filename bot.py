@@ -135,13 +135,25 @@ alpaca_ws_prices  = {}   # ticker -> latest trade price
 alpaca_ws_connected = False
 
 async def alpaca_websocket():
-    """Connect to Alpaca WebSocket for true real-time tick-by-tick prices"""
+    """Connect to Alpaca WebSocket only during market hours"""
     global alpaca_ws_prices, alpaca_ws_connected
     import websockets
 
     uri = "wss://stream.data.alpaca.markets/v2/sip"
 
     while True:
+        # Only connect during market hours (Mon-Fri, 8 AM - 5 PM NY)
+        ny = get_ny()
+        if ny.weekday() >= 5:
+            print("Weekend - Alpaca WS sleeping until Monday...")
+            await asyncio.sleep(3600)  # sleep 1 hour
+            continue
+
+        if ny.hour < 8 or ny.hour >= 17:
+            print("Outside market hours - Alpaca WS sleeping...")
+            await asyncio.sleep(1800)  # sleep 30 min
+            continue
+
         try:
             print("Connecting to Alpaca WebSocket...")
             async with websockets.connect(uri,
@@ -162,7 +174,7 @@ async def alpaca_websocket():
                 response = await ws.recv()
                 print("Alpaca WS auth:", response[:100])
 
-                # Subscribe to trades for all tickers
+                # Subscribe to trades
                 sub_msg = json.dumps({
                     "action": "subscribe",
                     "trades": list(watchlist)
@@ -173,11 +185,17 @@ async def alpaca_websocket():
 
                 # Listen for real-time trades
                 async for message in ws:
+                    # Check if still market hours
+                    ny = get_ny()
+                    if ny.weekday() >= 5 or ny.hour < 8 or ny.hour >= 17:
+                        print("Market closed - disconnecting WebSocket")
+                        alpaca_ws_connected = False
+                        break
                     try:
                         data = json.loads(message)
                         if isinstance(data, list):
                             for msg in data:
-                                if msg.get("T") == "t":  # trade message
+                                if msg.get("T") == "t":
                                     symbol = msg.get("S","")
                                     price  = msg.get("p", 0)
                                     if symbol and price:
@@ -189,8 +207,7 @@ async def alpaca_websocket():
         except Exception as e:
             alpaca_ws_connected = False
             print("Alpaca WebSocket error:", e)
-            print("Reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
+            await asyncio.sleep(30)  # wait 30 sec before retry
 
 async def finnhub_websocket():
     """Alias — runs Alpaca WebSocket instead"""
