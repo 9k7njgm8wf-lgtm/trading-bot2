@@ -5,6 +5,8 @@ import time
 from datetime import datetime, timezone, timedelta
 
 # ── CONFIG ────────────────────────────────────────────────
+FINNHUB_API_KEY = "d8mpeg1r01qn3046mvtgd8mpeg1r01qn3046mvu0"
+
 GROQ_API_KEY     = "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"
 ALPACA_API_KEY   = "AKPYM4PLBJBOEBSD3NQQVEDALI"
 ALPACA_SECRET    = "6Z73eeNG8Fpa64Tw7UBaEULCyFHJRCSh6r3kRgC7k2qo"
@@ -27,6 +29,10 @@ REQUIRE_3TF_AGREE  = True
 
 ALPACA_BASE    = "https://data.alpaca.markets/v2"
 ALPACA_HEADERS = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_SECRET}
+
+# ── FINNHUB REAL-TIME PRICE CACHE ────────────────────────
+finnhub_prices    = {}   # ticker -> latest price
+finnhub_connected = False
 
 # ── STATE ─────────────────────────────────────────────────
 last_signal_time   = {}
@@ -122,6 +128,64 @@ async def get_alpaca_price(session, ticker):
     except Exception as e:
         print("Alpaca price error "+ticker+":", e)
         return None
+
+# ── FINNHUB WEBSOCKET ────────────────────────────────────
+async def finnhub_websocket():
+    """Connect to Finnhub WebSocket for true real-time tick prices"""
+    global finnhub_prices, finnhub_connected
+    import websockets
+
+    uri = "wss://ws.finnhub.io?token="+FINNHUB_API_KEY
+
+    while True:
+        try:
+            print("Connecting to Finnhub WebSocket...")
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
+                finnhub_connected = True
+                print("Finnhub WebSocket connected!")
+
+                # Subscribe to all watchlist tickers
+                for ticker in watchlist:
+                    sub_msg = json.dumps({"type":"subscribe","symbol":ticker})
+                    await ws.send(sub_msg)
+                    print("Subscribed to", ticker)
+
+                # Listen for price updates
+                async for message in ws:
+                    try:
+                        data = json.loads(message)
+                        if data.get("type") == "trade":
+                            for trade in data.get("data", []):
+                                symbol = trade.get("s","")
+                                price  = trade.get("p", 0)
+                                if symbol and price:
+                                    finnhub_prices[symbol] = round(price, 4)
+                        elif data.get("type") == "ping":
+                            await ws.send(json.dumps({"type":"pong"}))
+                    except Exception as e:
+                        print("Finnhub parse error:", e)
+                        continue
+
+        except Exception as e:
+            finnhub_connected = False
+            print("Finnhub WebSocket error:", e)
+            print("Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+
+async def get_realtime_price(session, ticker):
+    """Get the most real-time price available — Finnhub first, then Alpaca, then Yahoo"""
+    # 1. Try Finnhub WebSocket (fastest - milliseconds)
+    if ticker in finnhub_prices and finnhub_prices[ticker] > 0:
+        return finnhub_prices[ticker], "FINNHUB-LIVE"
+
+    # 2. Try Alpaca SIP (fast - ~100ms)
+    alpaca_p = await get_alpaca_price(session, ticker)
+    if alpaca_p:
+        return alpaca_p, "ALPACA-SIP"
+
+    # 3. Fall back to Yahoo (delayed)
+    yp,_,_ = await yahoo_price(session, ticker)
+    return yp, "YAHOO-DELAYED"
 
 async def get_spy_trend(session):
     p,c,_ = await yahoo_price(session,"SPY")
@@ -846,7 +910,7 @@ async def ai_confirm(session, ticker, result, patterns, sentiment, tf_agrees):
         return {"verdict":"CONFIRMED","reason":"AI unavailable","tip":"Use your judgment"}
 
 # ── FORMAT MESSAGE ───────────────────────────────────────
-def build_msg(ticker, result, yp, yc, status, sentiment, headlines, patterns, ai, rvol, multiday, spy_trend, spy_chg, tf_agrees, orb_tag, shares, cost, risk_pct, reduced, st_data=None):
+def build_msg(ticker, result, yp, yc, status, sentiment, headlines, patterns, ai, rvol, multiday, spy_trend, spy_chg, tf_agrees, orb_tag, shares, cost, risk_pct, reduced, st_data=None, price_source=''):
     sig=result["signal"]; now=get_ny().strftime("%H:%M:%S")+" NY"
     score=result['buy_score'] if sig=="BUY" else result['sell_score']
     verdict=ai.get("verdict","CONFIRMED")
@@ -873,7 +937,7 @@ def build_msg(ticker, result, yp, yc, status, sentiment, headlines, patterns, ai
         ("MARKET OPEN" if status=="OPEN" else "PRE-MARKET")+" | "+get_session(),
         "SPY: "+spy_trend+" "+spy_sign+str(spy_chg)+"%",
         "",
-        "Live Price: $"+str(yp)+" "+sign+str(yc)+"% today" if yp else "Price: $"+str(result['entry']),
+        ("LIVE $"+str(yp)+" "+sign+str(yc)+"% ["+str(price_source)+"]") if yp else "Price: $"+str(result['entry']),
         "",
         "Entry:       $"+str(result['entry']),
         "Stop Loss:   $"+str(result['sl']),
@@ -1361,11 +1425,10 @@ async def main():
                     if ai.get("verdict")=="REJECTED":
                         await tg(session,"AI REJECTED "+ticker+" "+result["signal"]+": "+ai.get("reason","")); continue
 
-                    # Use Alpaca SIP for real-time price in message
-                    alpaca_live_price = await get_alpaca_price(session, ticker)
-                    yp_yahoo,yc,_ = await yahoo_price(session,ticker)
-                    # Use Alpaca price if available (real-time), fall back to Yahoo
-                    yp = alpaca_live_price if alpaca_live_price else yp_yahoo
+                    # Get most real-time price (Finnhub > Alpaca > Yahoo)
+                    yp, price_source = await get_realtime_price(session, ticker)
+                    _,yc,_ = await yahoo_price(session,ticker)  # change% from Yahoo
+                    print("    Price source:", price_source, "$"+str(yp))
                     shares,cost,risk_pct,reduced=calc_position(result['entry'],result['sl'])
                     score=result['buy_score'] if result['signal']=='BUY' else result['sell_score']
                     print("    SIGNAL:",result['signal'],"Score:"+str(score)+"/20","TF:"+str(tf_agrees)+"/3",
@@ -1374,7 +1437,7 @@ async def main():
                           "Sweep:"+str(result.get('liq_sweep')))
 
                     msg=build_msg(ticker,result,yp,yc,status,sentiment,headlines,patterns,ai,
-                                  rvol,multiday,spy_trend,spy_chg,tf_agrees,orb_tag,shares,cost,risk_pct,reduced,st_data)
+                                  rvol,multiday,spy_trend,spy_chg,tf_agrees,orb_tag,shares,cost,risk_pct,reduced,st_data,price_source)
                     await tg(session,msg)
 
                     active_trades[ticker]={"signal":result["signal"],"entry":result["entry"],
@@ -1391,5 +1454,12 @@ async def main():
 
             await asyncio.sleep(SCAN_INTERVAL)
 
+async def run_all():
+    """Run both main bot and Finnhub WebSocket simultaneously"""
+    await asyncio.gather(
+        main(),
+        finnhub_websocket()
+    )
+
 if __name__=="__main__":
-    asyncio.run(main())
+    asyncio.run(run_all())
