@@ -1417,6 +1417,37 @@ async def main():
                     yp, price_source = await get_realtime_price(session, ticker)
                     _,yc,_ = await yahoo_price(session,ticker)  # change% from Yahoo
                     print("    Price source:", price_source, "$"+str(yp))
+
+                    # ── Price deviation filter ──────────────────────────
+                    if yp and result['entry']:
+                        deviation = abs(yp - result['entry']) / result['entry'] * 100
+                        if deviation > 1.0:
+                            direction = "above" if yp > result['entry'] else "below"
+                            if result['signal'] == "BUY" and yp > result['entry'] * 1.01:
+                                await tg(session,
+                                    "ENTRY EXPIRED - "+ticker+"\n\n"
+                                    "Signal: BUY @ $"+str(result['entry'])+"\n"
+                                    "Live price: $"+str(yp)+" (+"+str(round(deviation,1))+"% above entry)\n"
+                                    "Price moved too far - SKIP this trade\n"
+                                    "Wait for next signal.")
+                                continue
+                            elif result['signal'] == "SELL" and yp < result['entry'] * 0.99:
+                                await tg(session,
+                                    "ENTRY EXPIRED - "+ticker+"\n\n"
+                                    "Signal: SELL @ $"+str(result['entry'])+"\n"
+                                    "Live price: $"+str(yp)+" (-"+str(round(deviation,1))+"% below entry)\n"
+                                    "Price moved too far - SKIP this trade\n"
+                                    "Wait for next signal.")
+                                continue
+                            elif deviation <= 1.0:
+                                pass  # within range, proceed
+                            # If price moved in our favour, update entry
+                            if result['signal'] == "BUY" and yp < result['entry']:
+                                result['entry'] = yp  # better entry!
+                                print("    Better BUY entry: $"+str(yp))
+                            elif result['signal'] == "SELL" and yp > result['entry']:
+                                result['entry'] = yp  # better entry!
+                                print("    Better SELL entry: $"+str(yp))
                     shares,cost,risk_pct,reduced=calc_position(result['entry'],result['sl'])
                     score=result['buy_score'] if result['signal']=='BUY' else result['sell_score']
                     print("    SIGNAL:",result['signal'],"Score:"+str(score)+"/20","TF:"+str(tf_agrees)+"/3",
