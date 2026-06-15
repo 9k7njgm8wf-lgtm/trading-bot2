@@ -768,8 +768,8 @@ async def replace_ticker(removed_ticker):
                     atr = calc_atr(bars)
                     if not all([rsi, vol_r, atr]): continue
                     atr_pct = (atr/p)*100
-                    # Good candidate: RSI not overbought, volume good, moving
-                    if 30 < rsi < 65 and vol_r >= 1.2 and atr_pct >= 1.5:
+                    # Good candidate: RSI good range, volume up, price moving UP
+                    if 30 < rsi < 60 and vol_r >= 1.5 and atr_pct >= 1.5 and (chg or 0) > 0:
                         score = 0
                         if vol_r >= 2: score += 3
                         elif vol_r >= 1.5: score += 2
@@ -789,13 +789,7 @@ async def replace_ticker(removed_ticker):
                 best = candidates[0]
                 watchlist.append(best['ticker'])
                 sign = "+" if best['change'] >= 0 else ""
-                msg = ("REPLACED "+removed_ticker+" (entry expired)\n\n"
-                       "New stock: "+best['ticker']+"\n"
-                       "Price: $"+str(best['price'])+" "+sign+str(best['change'])+"%\n"
-                       "RSI: "+str(best['rsi'])+" | RVOL: "+str(best['vol_r'])+"x\n"
-                       "ATR: "+str(best['atr_pct'])+"% | Score: "+str(best['score']))
-                await tg(session, msg)
-                print("Replaced", removed_ticker, "with", best['ticker'])
+                print("Replaced "+removed_ticker+" with "+best['ticker']+" silently")
             else:
                 # Re-add from defaults silently
                 for t in DEFAULT_WATCHLIST:
