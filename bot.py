@@ -214,7 +214,11 @@ async def alpaca_websocket():
     uri = "wss://stream.data.alpaca.markets/v2/sip"
     while True:
         ny = get_ny()
-        if ny.weekday()>=5 or ny.hour<8 or ny.hour>=17:
+        # Keep WS open 8 AM - 4:30 PM NY on weekdays
+        after_close = ny.hour > 16 or (ny.hour == 16 and ny.minute >= 30)
+        before_open = ny.hour < 8
+        if ny.weekday()>=5 or before_open or after_close:
+            print("WS sleeping - outside market hours NY:", ny.strftime("%H:%M"))
             await asyncio.sleep(1800); continue
         try:
             print("Connecting Alpaca WebSocket...")
@@ -229,7 +233,8 @@ async def alpaca_websocket():
                 print("Alpaca WS connected! Watching:", watchlist)
                 async for message in ws:
                     ny = get_ny()
-                    if ny.weekday()>=5 or ny.hour<8 or ny.hour>=17: break
+                    after_close = ny.hour > 16 or (ny.hour == 16 and ny.minute >= 30)
+                    if ny.weekday()>=5 or ny.hour<8 or after_close: break
                     try:
                         for msg in json.loads(message):
                             if msg.get("T")=="t":
