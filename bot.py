@@ -1212,6 +1212,14 @@ async def main():
             # Reset daily at midnight
             if ny.hour==0 and ny.minute==0: reset_daily()
 
+            # Heartbeat every 30 min during market hours
+            if status=="OPEN" and ny.minute in [0,30] and ny.second < 65:
+                score_summary = []
+                for t in watchlist:
+                    if t in no_signal_count:
+                        score_summary.append(t+":"+str(no_signal_count.get(t,0))+"no-sig")
+                print("Heartbeat - watching:",watchlist,"no-signal counts:",no_signal_count)
+
             # Pre-market Stocktwits scan at 8:00 AM NY (1:00 PM UK)
             if ny.hour==8 and ny.minute==0 and ny.weekday()<5:
                 try: await stocktwits_premarket_scan(session)
@@ -1433,38 +1441,16 @@ async def main():
 
                 except Exception as e: print("  ERROR",ticker,":",e); continue
 
-            # ── 5-min rescan if no signals found ─────────────────
-            # Check if any ticker has been no-signal for 5+ minutes
-            tickers_to_rescan = [t for t,c in no_signal_count.items() if c >= 5]
-            if tickers_to_rescan and status=="OPEN":
-                print("  Rescanning - no signals for 5+ min on:", tickers_to_rescan)
-                await tg(session, "No signals on "+", ".join(tickers_to_rescan)+" for 5 min - scanning for better opportunities...")
-                # Quick scan for replacements
-                new_picks = []
-                for ticker in SCAN_UNIVERSE[:20]:  # quick scan top 20
-                    if ticker in watchlist: continue
-                    try:
-                        p,chg,vol=await yahoo_price(session,ticker)
-                        if not p or abs(chg or 0)<1: continue
-                        bars=await get_bars(session,ticker,"5Min",20)
-                        if len(bars)<10: continue
-                        closes=[b['c'] for b in bars]
-                        rsi=calc_rsi(closes); vol_r=calc_vol_ratio(bars)
-                        if rsi and vol_r and 30<rsi<70 and vol_r>1.2:
-                            new_picks.append({"ticker":ticker,"price":p,"change":chg,"rsi":rsi,"vol_r":vol_r})
-                        await asyncio.sleep(0.3)
-                    except: continue
-                if new_picks:
-                    new_picks.sort(key=lambda x:x['vol_r'],reverse=True)
-                    best=new_picks[0]
-                    # Replace worst performing ticker
-                    if tickers_to_rescan and tickers_to_rescan[0] in watchlist:
-                        old_ticker=tickers_to_rescan[0]
-                        watchlist.remove(old_ticker)
-                        watchlist.append(best['ticker'])
-                        no_signal_count[old_ticker]=0
-                        await tg(session,"Replaced "+old_ticker+" with "+best['ticker']+" ($"+str(best['price'])+" RVOL:"+str(round(best['vol_r'],1))+"x RSI:"+str(best['rsi'])+")")
-                        print("  Replaced",old_ticker,"with",best['ticker'])
+            # ── Continuous rescan - replace any stock with no signal ──
+            if status=="OPEN":
+                for ticker in list(watchlist):
+                    count = no_signal_count.get(ticker, 0)
+                    if count >= 3:  # 3 consecutive no-signals = replace
+                        print("  No signal on "+ticker+" for "+str(count)+" scans - replacing")
+                        if ticker in watchlist:
+                            watchlist.remove(ticker)
+                        asyncio.ensure_future(replace_ticker(ticker))
+                        no_signal_count[ticker] = 0
 
             await asyncio.sleep(SCAN_INTERVAL)
 
