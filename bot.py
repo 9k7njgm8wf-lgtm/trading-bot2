@@ -19,14 +19,15 @@ ACCOUNT_SIZE       = 10000
 RISK_PCT           = 2
 MAX_OPEN_TRADES    = 10
 DAILY_LOSS_LIMIT   = 5.0
-MAX_TRADES_PER_DAY = 20  # more opportunities
+MAX_TRADES_PER_DAY = 20
 SCAN_INTERVAL      = 30  # scan every 30 seconds
 SIGNAL_COOLDOWN    = 1800
-MIN_SCORE          = 8  # higher = better quality trades
-BEST_HOURS         = [(9,30,16,0)]  # full market hours 9:30 AM - 4:00 PM
+MIN_SCORE          = 8
+BEST_HOURS         = [(9,30,16,0)]
 SPY_FILTER         = True
-TIME_FILTER        = False  # disabled - trade all market hours
-REQUIRE_3TF_AGREE  = True   # must agree on 2/3 timeframes
+TIME_FILTER        = False
+REQUIRE_3TF_AGREE  = True
+ALLOW_SHORT        = True  # allow SELL/short positions
 CLOSE_ALL_TIME     = (15, 45)  # Close all positions at 3:45 PM NY
 
 # Leverage by confidence
@@ -1321,8 +1322,14 @@ async def main():
 
                     spy_trend,spy_chg,_=await get_spy_trend(session)
                     if SPY_FILTER:
+                        # Only block BUY in strong bear market
                         if result["signal"]=="BUY" and spy_trend=="BEAR": continue
-                        if result["signal"]=="SELL" and spy_trend=="BULL": continue
+                        # SELL signals allowed regardless of SPY direction
+                        # (shorting is valid even in bull market if stock is bearish)
+
+                    # Block short selling if disabled
+                    if result["signal"]=="SELL" and not ALLOW_SHORT:
+                        continue
 
                     # SMT handled by score penalty in compute_signal
                     if result.get("smt"):
@@ -1431,13 +1438,16 @@ async def main():
                                 side="buy" if result["signal"]=="BUY" else "sell"
                                 order=await place_order(session,ticker,side,shares,result['sl'],result['tp'])
                                 if order["success"]:
+                                    trade_type = "LONG" if side=="buy" else "SHORT"
+                                    emoji = "BUY" if side=="buy" else "SELL SHORT"
                                     await tg(session,
-                                        "AUTO-TRADE PLACED [PAPER]\n\n"
-                                        +result["signal"]+" "+ticker+"\n"
+                                        "AUTO-TRADE PLACED [PAPER] - "+trade_type+"\n\n"
+                                        +emoji+" "+ticker+"\n"
                                         "Qty: "+str(shares)+" shares\n"
                                         "Entry: $"+str(result['entry'])+"\n"
                                         "SL: $"+str(result['sl'])+"\n"
                                         "TP: $"+str(result['tp'])+"\n"
+                                        "R/R: "+result['rr']+"\n"
                                         "Leverage: 1:"+str(leverage)+"\n"
                                         "Cost: $"+str(cost)+"\n"
                                         "Account: $"+str(equity))
