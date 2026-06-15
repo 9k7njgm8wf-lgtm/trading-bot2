@@ -4,13 +4,16 @@ import json
 import time
 from datetime import datetime, timezone, timedelta
 
-# ── CONFIG ────────────────────────────────────────────────
-FINNHUB_API_KEY  = "d8mpeg1r01qn3046mvtgd8mpeg1r01qn3046mvu0"
-GROQ_API_KEY     = "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"
-ALPACA_API_KEY   = "PKHY4LGTE2AF3PCURW4JJB423B"
-ALPACA_SECRET    = "7NwLWDCxprL794BdsCheM9CB8D4VAi2GSqKTgfovv3Ws"
-TELEGRAM_TOKEN   = "8855798705:AAEW4y6GQ-rTTJMsyRYThG9nkI-0S8qIxqs"
-TELEGRAM_CHAT_ID = "6903579390"
+import os
+
+# ── CONFIG (from Railway environment variables) ───────────
+# Set these in Railway → Variables tab (never in code!)
+FINNHUB_API_KEY  = os.environ.get("FINNHUB_API_KEY",  "d8mpeg1r01qn3046mvtgd8mpeg1r01qn3046mvu0")
+GROQ_API_KEY     = os.environ.get("GROQ_API_KEY",     "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")
+ALPACA_API_KEY   = os.environ.get("ALPACA_API_KEY",   "PKHY4LGTE2AF3PCURW4JJB423B")
+ALPACA_SECRET    = os.environ.get("ALPACA_SECRET",    "7NwLWDCxprL794BdsCheM9CB8D4VAi2GSqKTgfovv3Ws")
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "8855798705:AAFuUv_mpafzcaSKwnsye1bgYHLomJS2SAU")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "6903579390")
 
 # ── TRADING CONFIG ────────────────────────────────────────
 AUTO_TRADE         = True
@@ -35,7 +38,7 @@ LEVERAGE_MAP = {"HIGH": 2, "MEDIUM": 1}
 
 # ── SCAN UNIVERSE (200+ stocks) ───────────────────────────
 SMALL_CAPS = [
-    "RGTI","RXT","QUBT","LUNR","BBAI","SOUN","KULR","MARA","RIOT","CLSK",
+    "RXT","QUBT","LUNR","BBAI","SOUN","KULR","MARA","RIOT","CLSK","HOOD",
     "HIMS","RKLB","ASTS","ACHR","JOBY","NKLA","BLNK","PLUG","FCEL","SPCE",
     "NVAX","ACAD","ITCI","CLOV","WISH","WKHS","HYZN","GOEV","NKLA","RIDE",
     "MVIS","OCGN","AGEN","CTIC","CYTO","DARE","SINT","FREQ","SENS","CLVS",
@@ -59,7 +62,7 @@ ALPACA_HEADERS       = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":A
 ALPACA_TRADE_HEADERS = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_SECRET,"Content-Type":"application/json"}
 
 # ── DEFAULT WATCHLIST (always has stocks) ─────────────────
-DEFAULT_WATCHLIST = ["MARA", "SOUN", "RGTI", "RIOT", "BBAI"]
+DEFAULT_WATCHLIST = ["MARA", "SOUN", "RIOT", "BBAI", "MSTR"]
 
 # ── RESCAN STATE ─────────────────────────────────────────
 last_signal_found   = {}   # ticker -> last time signal was found
