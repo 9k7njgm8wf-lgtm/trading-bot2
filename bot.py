@@ -209,47 +209,41 @@ async def get_yahoo_bars(session, ticker, days=90):
 
 # ── ALPACA WEBSOCKET ─────────────────────────────────────
 async def alpaca_websocket():
+    """Poll Alpaca REST every 5 seconds - reliable alternative to WebSocket"""
     global alpaca_ws_prices, alpaca_ws_connected
-    import websockets
-    uri = "wss://stream.data.alpaca.markets/v2/sip"
-    reconnect_delay = 5
-    while True:
-        ny = get_ny()
-        after_close = ny.hour > 16 or (ny.hour == 16 and ny.minute >= 30)
-        before_open = ny.hour < 8
-        if ny.weekday()>=5 or before_open or after_close:
-            alpaca_ws_connected = False
-            await asyncio.sleep(1800); continue
-        try:
-            print("Connecting Alpaca WebSocket...")
-            async with websockets.connect(uri,
-                extra_headers={"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_SECRET},
-                ping_interval=10, ping_timeout=5, close_timeout=5) as ws:
-                await ws.send(json.dumps({"action":"auth","key":ALPACA_API_KEY,"secret":ALPACA_SECRET}))
-                try: resp = await asyncio.wait_for(ws.recv(), timeout=5)
-                except: resp = ""
+    print("Alpaca REST price poller starting...")
+    alpaca_ws_connected = True
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                ny = get_ny()
+                after_close = ny.hour > 16 or (ny.hour == 16 and ny.minute >= 30)
+                before_open = ny.hour < 8
+                if ny.weekday()>=5 or before_open or after_close:
+                    await asyncio.sleep(1800); continue
+
                 tickers = list(watchlist) if watchlist else list(DEFAULT_WATCHLIST)
-                await ws.send(json.dumps({"action":"subscribe","trades":tickers}))
-                alpaca_ws_connected = True
-                reconnect_delay = 5
-                print("Alpaca WS live! Watching:", tickers)
-                while True:
+                for ticker in tickers:
                     try:
-                        message = await asyncio.wait_for(ws.recv(), timeout=30)
-                        for msg in json.loads(message):
-                            if msg.get("T")=="t":
-                                s,p = msg.get("S",""),msg.get("p",0)
-                                if s and p: alpaca_ws_prices[s]=round(p,4)
-                    except asyncio.TimeoutError:
-                        try: await ws.ping()
-                        except: break
-                    except Exception as e:
-                        print("WS recv error:",e); break
-        except Exception as e:
-            alpaca_ws_connected = False
-            print("Alpaca WS error:",e)
-            await asyncio.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay*2, 60)
+                        async with session.get(
+                            ALPACA_BASE+"/stocks/"+ticker+"/trades/latest",
+                            headers=ALPACA_HEADERS,
+                            params={"feed":"sip"},
+                            timeout=aiohttp.ClientTimeout(total=3)
+                        ) as r:
+                            data = await r.json()
+                            price = data.get("trade",{}).get("p")
+                            if price:
+                                alpaca_ws_prices[ticker] = round(price,4)
+                    except: pass
+                    await asyncio.sleep(0.5)
+
+                await asyncio.sleep(5)  # poll every 5 seconds
+
+            except Exception as e:
+                print("Price poller error:",e)
+                await asyncio.sleep(10)
 
 # ── AUTO TRADING FUNCTIONS ────────────────────────────────
 async def get_account_info(session):
