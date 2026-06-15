@@ -1244,9 +1244,10 @@ async def main():
                         if result["signal"]=="SELL" and spy_trend=="BULL": continue
 
                     if result.get("smt"):
-                        print("    TRAP on "+ticker+": "+result['smt']+" - immediate rescan")
-                        no_signal_count[ticker] = RESCAN_AFTER + 1  # trigger immediate rescan
-                        continue
+                        print("    TRAP on "+ticker+": "+result['smt']+" - skipping this ticker only")
+                        last_signal_time[ticker] = datetime.now()  # cooldown this ticker
+                        last_signal_type[ticker] = "TRAP"
+                        continue  # skip just this ticker, don't rescan all
 
                     rvol=calc_rvol(bars_1m,bars_yest)
                     multiday=get_multiday(bars_daily)
