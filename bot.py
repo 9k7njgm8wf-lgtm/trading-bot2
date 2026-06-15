@@ -212,39 +212,44 @@ async def alpaca_websocket():
     global alpaca_ws_prices, alpaca_ws_connected
     import websockets
     uri = "wss://stream.data.alpaca.markets/v2/sip"
+    reconnect_delay = 5
     while True:
         ny = get_ny()
-        # Keep WS open 8 AM - 4:30 PM NY on weekdays
         after_close = ny.hour > 16 or (ny.hour == 16 and ny.minute >= 30)
         before_open = ny.hour < 8
         if ny.weekday()>=5 or before_open or after_close:
-            print("WS sleeping - outside market hours NY:", ny.strftime("%H:%M"))
+            alpaca_ws_connected = False
             await asyncio.sleep(1800); continue
         try:
             print("Connecting Alpaca WebSocket...")
             async with websockets.connect(uri,
                 extra_headers={"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_SECRET},
-                ping_interval=30, ping_timeout=10) as ws:
+                ping_interval=10, ping_timeout=5, close_timeout=5) as ws:
                 await ws.send(json.dumps({"action":"auth","key":ALPACA_API_KEY,"secret":ALPACA_SECRET}))
-                await ws.recv()
-                if watchlist:
-                    await ws.send(json.dumps({"action":"subscribe","trades":list(watchlist)}))
+                try: resp = await asyncio.wait_for(ws.recv(), timeout=5)
+                except: resp = ""
+                tickers = list(watchlist) if watchlist else list(DEFAULT_WATCHLIST)
+                await ws.send(json.dumps({"action":"subscribe","trades":tickers}))
                 alpaca_ws_connected = True
-                print("Alpaca WS connected! Watching:", watchlist)
-                async for message in ws:
-                    ny = get_ny()
-                    after_close = ny.hour > 16 or (ny.hour == 16 and ny.minute >= 30)
-                    if ny.weekday()>=5 or ny.hour<8 or after_close: break
+                reconnect_delay = 5
+                print("Alpaca WS live! Watching:", tickers)
+                while True:
                     try:
+                        message = await asyncio.wait_for(ws.recv(), timeout=30)
                         for msg in json.loads(message):
                             if msg.get("T")=="t":
                                 s,p = msg.get("S",""),msg.get("p",0)
                                 if s and p: alpaca_ws_prices[s]=round(p,4)
-                    except: continue
+                    except asyncio.TimeoutError:
+                        try: await ws.ping()
+                        except: break
+                    except Exception as e:
+                        print("WS recv error:",e); break
         except Exception as e:
-            alpaca_ws_connected=False
+            alpaca_ws_connected = False
             print("Alpaca WS error:",e)
-            await asyncio.sleep(30)
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay*2, 60)
 
 # ── AUTO TRADING FUNCTIONS ────────────────────────────────
 async def get_account_info(session):
