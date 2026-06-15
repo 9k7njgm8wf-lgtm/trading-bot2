@@ -1351,13 +1351,19 @@ async def main():
                     # Get Finnhub day high/low for context
                     _,fh_chg2,fh_day_high,fh_day_low=await get_finnhub_price(session,ticker)
 
-                    # Price deviation filter
+                    # Price deviation filter - silent, just remove and replace
                     if yp and result['entry']:
                         dev=abs(yp-result['entry'])/result['entry']*100
                         if result['signal']=="BUY" and yp>result['entry']*1.01:
-                            await tg(session,"ENTRY EXPIRED - "+ticker+"\nPrice moved +"+str(round(dev,1))+"% from signal\nSkipping..."); continue
+                            print("    EXPIRED "+ticker+" +"+str(round(dev,1))+"%")
+                            if ticker in watchlist: watchlist.remove(ticker)
+                            asyncio.ensure_future(replace_ticker(ticker))
+                            continue
                         if result['signal']=="SELL" and yp<result['entry']*0.99:
-                            await tg(session,"ENTRY EXPIRED - "+ticker+"\nPrice moved -"+str(round(dev,1))+"% from signal\nSkipping..."); continue
+                            print("    EXPIRED "+ticker+" -"+str(round(dev,1))+"%")
+                            if ticker in watchlist: watchlist.remove(ticker)
+                            asyncio.ensure_future(replace_ticker(ticker))
+                            continue
 
                     # Calculate position with leverage
                     acct=await get_account_info(session)
