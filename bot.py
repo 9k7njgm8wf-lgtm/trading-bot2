@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 
 # ── CONFIG ────────────────────────────────────────────────
 FINNHUB_API_KEY  = "d8mpeg1r01qn3046mvtgd8mpeg1r01qn3046mvu0"
-GROQ_API_KEY     = "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"
+GROQ_API_KEY     = "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"
 ALPACA_API_KEY   = "PKHY4LGTE2AF3PCURW4JJB423B"
 ALPACA_SECRET    = "7NwLWDCxprL794BdsCheM9CB8D4VAi2GSqKTgfovv3Ws"
 TELEGRAM_TOKEN   = "8855798705:AAEpXzUvjauUh6rBgMN-EqCSRVbhIlXMDj4"
