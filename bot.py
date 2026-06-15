@@ -9,7 +9,7 @@ FINNHUB_API_KEY  = "d8mpeg1r01qn3046mvtgd8mpeg1r01qn3046mvu0"
 GROQ_API_KEY     = "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"
 ALPACA_API_KEY   = "PKHY4LGTE2AF3PCURW4JJB423B"
 ALPACA_SECRET    = "7NwLWDCxprL794BdsCheM9CB8D4VAi2GSqKTgfovv3Ws"
-TELEGRAM_TOKEN   = "8855798705:AAHC0s0-zwlrALc9baA16tmGDk-VH8PZ8CQ"
+TELEGRAM_TOKEN   = "8855798705:AAEW4y6GQ-rTTJMsyRYThG9nkI-0S8qIxqs"
 TELEGRAM_CHAT_ID = "6903579390"
 
 # ── TRADING CONFIG ────────────────────────────────────────
@@ -17,16 +17,16 @@ AUTO_TRADE         = True
 PAPER_TRADING      = True
 ACCOUNT_SIZE       = 10000
 RISK_PCT           = 2
-MAX_OPEN_TRADES    = 3
+MAX_OPEN_TRADES    = 10
 DAILY_LOSS_LIMIT   = 5.0
-MAX_TRADES_PER_DAY = 6
-SCAN_INTERVAL      = 60
+MAX_TRADES_PER_DAY = 20  # more opportunities
+SCAN_INTERVAL      = 30  # scan every 30 seconds
 SIGNAL_COOLDOWN    = 1800
-MIN_SCORE          = 4  # lowered further
+MIN_SCORE          = 8  # higher = better quality trades
 BEST_HOURS         = [(9,30,16,0)]  # full market hours 9:30 AM - 4:00 PM
 SPY_FILTER         = True
 TIME_FILTER        = False  # disabled - trade all market hours
-REQUIRE_3TF_AGREE  = False  # disabled - too strict
+REQUIRE_3TF_AGREE  = True   # must agree on 2/3 timeframes
 CLOSE_ALL_TIME     = (15, 45)  # Close all positions at 3:45 PM NY
 
 # Leverage by confidence
@@ -1211,6 +1211,7 @@ async def main():
                 if new_wl:
                     watchlist.clear()
                     watchlist.extend(new_wl)
+                    await tg(session, "Watching: "+" | ".join(new_wl))
                     print("Startup scan complete:", watchlist)
             except Exception as e:
                 print("Startup scan error:", e)
@@ -1224,13 +1225,11 @@ async def main():
             # Reset daily at midnight
             if ny.hour==0 and ny.minute==0: reset_daily()
 
-            # Heartbeat every 30 min during market hours
-            if status=="OPEN" and ny.minute in [0,30] and ny.second < 65:
-                score_summary = []
-                for t in watchlist:
-                    if t in no_signal_count:
-                        score_summary.append(t+":"+str(no_signal_count.get(t,0))+"no-sig")
-                print("Heartbeat - watching:",watchlist,"no-signal counts:",no_signal_count)
+            # Show watchlist every 30 min during market hours
+            if status=="OPEN" and ny.minute in [0,30] and ny.second < 35:
+                wl_msg = "Scanning: "+" | ".join(watchlist)
+                await tg(session, wl_msg)
+                print("Heartbeat - watching:",watchlist)
 
             # Pre-market Stocktwits scan at 8:00 AM NY (1:00 PM UK)
             if ny.hour==8 and ny.minute==0 and ny.weekday()<5:
@@ -1363,8 +1362,8 @@ async def main():
                         continue
 
                     ai=await ai_confirm(session,ticker,result,patterns,sentiment,tf_agrees)
-                    if ai.get("verdict")=="REJECTED":
-                        print("    AI REJECTED "+ticker+": "+ai.get("reason",""))
+                    if ai.get("verdict") in ["REJECTED","CAUTION"]:
+                        print("    AI "+ai.get("verdict")+" "+ticker+": "+ai.get("reason",""))
                         continue
 
                     # Get live price and ALWAYS use as entry
