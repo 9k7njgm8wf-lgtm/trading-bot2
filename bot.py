@@ -797,11 +797,11 @@ async def replace_ticker(removed_ticker):
                 await tg(session, msg)
                 print("Replaced", removed_ticker, "with", best['ticker'])
             else:
-                # Re-add from defaults if no candidate found
+                # Re-add from defaults silently
                 for t in DEFAULT_WATCHLIST:
                     if t not in watchlist:
                         watchlist.append(t)
-                        await tg(session, removed_ticker+" removed. Re-added "+t+" from defaults.")
+                        print("Re-added "+t+" from defaults after removing "+removed_ticker)
                         break
         except Exception as e:
             print("Replace ticker error:", e)
@@ -953,12 +953,13 @@ async def check_trailing(session):
                 nt=round(yp-atr*1.5,4); ct=trailing_stops.get(ticker,trade["sl"])
                 if nt>ct:
                     trailing_stops[ticker]=nt
-                    await tg(session,"Trailing SL updated "+ticker+": $"+str(nt))
+                    print("Trailing SL updated "+ticker+": $"+str(nt))
                 if yp<=trailing_stops.get(ticker,trade["sl"]):
                     pnl=round((yp-entry)/entry*100,2); daily_pnl+=pnl
                     if pnl<0: losing_streak+=1
                     else: losing_streak=0
-                    await tg(session,"TRAILING STOP HIT "+ticker+"\nExit: $"+str(yp)+" P&L: "+str(pnl)+"%")
+                    sign="+" if pnl>=0 else ""
+                    await tg(session,"TRADE CLOSED - "+ticker+"\nExit: $"+str(yp)+"\nP&L: "+sign+str(pnl)+"%\n"+("PROFIT!" if pnl>0 else "Stop loss hit."))
                     performance_log.append({"ticker":ticker,"signal":sig,"entry":entry,"exit":yp,"pnl":pnl,"time":get_ny().strftime("%H:%M")})
                     all_time_log.append({"ticker":ticker,"signal":sig,"entry":entry,"exit":yp,"pnl":pnl,"date":get_ny().strftime("%Y-%m-%d")})
                     del active_trades[ticker]
