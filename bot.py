@@ -710,8 +710,8 @@ def compute_signal(bars_1m, bars_5m, bars_15m):
     if po3=="DISTRIBUTION_BEARISH": ss+=2
     if zone=="DISCOUNT": bs+=2
     if zone=="PREMIUM": ss+=2
-    if smt=="BULL_TRAP": bs-=3; ss+=2
-    if smt=="BEAR_TRAP": ss-=3; bs+=2
+    if smt=="BULL_TRAP": bs-=5; ss+=2  # heavy penalty but don't block completely
+    if smt=="BEAR_TRAP": ss-=5; bs+=2
     if bs>=MIN_SCORE: signal="BUY"; conf="HIGH" if bs>=10 else "MEDIUM"
     elif ss>=MIN_SCORE: signal="SELL"; conf="HIGH" if ss>=10 else "MEDIUM"
     else: return None
@@ -884,13 +884,21 @@ async def ai_confirm(session, ticker, result, patterns, sentiment, tf_agrees):
                 print("Groq API error:", data)
                 return {"verdict":"CONFIRMED","reason":"AI rate limited","tip":"Check signal manually"}
             raw=data["choices"][0]["message"]["content"].strip()
-            # Clean up response
             raw=raw.replace("```json","").replace("```","").strip()
-            # Find JSON in response
+            # Find JSON object
             start=raw.find("{"); end=raw.rfind("}")+1
             if start>=0 and end>start:
                 raw=raw[start:end]
-            return json.loads(raw)
+            # Fix common JSON issues
+            raw=raw.replace("\n","").replace("\t","")
+            try:
+                return json.loads(raw)
+            except:
+                # Try to extract key fields manually
+                verdict = "CONFIRMED"
+                if '"REJECTED"' in raw: verdict = "REJECTED"
+                elif '"CAUTION"' in raw: verdict = "CAUTION"
+                return {"verdict":verdict,"reason":"AI parse error","tip":"Check manually"}
     except Exception as e:
         print("Groq error:",e)
         return {"verdict":"CONFIRMED","reason":"AI temporarily unavailable","tip":"Use your judgment"}
@@ -1303,11 +1311,9 @@ async def main():
                         if result["signal"]=="BUY" and spy_trend=="BEAR": continue
                         if result["signal"]=="SELL" and spy_trend=="BULL": continue
 
+                    # SMT handled by score penalty in compute_signal
                     if result.get("smt"):
-                        print("    TRAP on "+ticker+": "+result['smt']+" - skipping this ticker only")
-                        last_signal_time[ticker] = datetime.now()  # cooldown this ticker
-                        last_signal_type[ticker] = "TRAP"
-                        continue  # skip just this ticker, don't rescan all
+                        print("    "+ticker+" has "+str(result['smt'])+" - score penalised")
 
                     rvol=calc_rvol(bars_1m,bars_yest)
                     multiday=get_multiday(bars_daily)
