@@ -315,11 +315,11 @@ async def smart_daily_scan(session):
             atr_pct = (atr/p)*100
 
             # Skip if price too low or too high
-            if p < 2 or p > 200: continue
+            if p < 1 or p > 500: continue
             # Skip if no volume
-            if rvol < 1.2: continue
+            if rvol < 0.8: continue
             # Skip if not moving
-            if abs(chg) < 1: continue
+            if abs(chg) < 0.5: continue
 
             # Scoring
             score = 0
@@ -352,7 +352,7 @@ async def smart_daily_scan(session):
             elif 2 <= p < 5 or 50 < p <= 100: score += 1
 
             # Minimum score filter
-            if score >= 6:
+            if score >= 3:
                 candidates.append({
                     "ticker": ticker, "price": p, "change": chg,
                     "vol": vol, "rvol": round(rvol,1),
@@ -1019,17 +1019,18 @@ async def main():
             # Reset daily at midnight
             if ny.hour==0 and ny.minute==0: reset_daily()
 
-            # Smart daily scan at 9:20 AM NY
+            # Smart daily scan at 9:20 AM NY (only once per day)
             if ny.hour==9 and ny.minute==20 and ny.weekday()<5 and ny.day!=last_scan_day:
+                last_scan_day=ny.day  # set FIRST to prevent duplicate
                 try:
                     new_wl=await smart_daily_scan(session)
                     watchlist.clear(); watchlist.extend(new_wl)
-                    last_scan_day=ny.day
                 except Exception as e: print("Scan err:",e)
 
-            # Morning brief at 9:25 AM
+            # Morning brief at 9:25 AM (only once per day)
             if ny.hour==9 and ny.minute==25 and not morning_brief_sent and ny.weekday()<5:
-                try: await morning_brief(session); morning_brief_sent=True
+                morning_brief_sent=True  # set FIRST to prevent duplicate
+                try: await morning_brief(session)
                 except: pass
             if ny.hour==9 and ny.minute==26: morning_brief_sent=False
 
