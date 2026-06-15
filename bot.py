@@ -172,11 +172,42 @@ async def get_alpaca_price(session, ticker):
             return round(price,4) if price else None
     except: return None
 
+async def get_finnhub_price(session, ticker):
+    """Get real-time price from Finnhub for trade accuracy confirmation"""
+    try:
+        async with session.get(
+            "https://finnhub.io/api/v1/quote",
+            params={"symbol":ticker,"token":FINNHUB_API_KEY},
+            timeout=aiohttp.ClientTimeout(total=5)
+        ) as r:
+            data = await r.json()
+            price = data.get("c",0)  # current price
+            high  = data.get("h",0)  # day high
+            low   = data.get("l",0)  # day low
+            prev  = data.get("pc",0) # prev close
+            if price and price>0:
+                change_pct = round(((price-prev)/prev)*100,2) if prev else 0
+                return round(price,4), change_pct, round(high,4), round(low,4)
+            return None,None,None,None
+    except Exception as e:
+        print("Finnhub price error "+ticker+":",e)
+        return None,None,None,None
+
 async def get_realtime_price(session, ticker):
-    if ticker in alpaca_ws_prices and alpaca_ws_prices[ticker]>0:
-        return alpaca_ws_prices[ticker], "ALPACA-WS"
+    """Get best available real-time price: Finnhub > Alpaca REST > Alpaca WS > Yahoo"""
+    # 1. Try Finnhub (most accurate, real-time)
+    fp,_,_,_ = await get_finnhub_price(session, ticker)
+    if fp: return fp, "FINNHUB"
+
+    # 2. Try Alpaca REST SIP
     p = await get_alpaca_price(session, ticker)
     if p: return p, "ALPACA-SIP"
+
+    # 3. Try Alpaca WebSocket cache
+    if ticker in alpaca_ws_prices and alpaca_ws_prices[ticker]>0:
+        return alpaca_ws_prices[ticker], "ALPACA-WS"
+
+    # 4. Yahoo fallback
     yp,_,_ = await yahoo_price(session, ticker)
     return yp, "YAHOO"
 
@@ -1213,7 +1244,9 @@ async def main():
                         if result["signal"]=="SELL" and spy_trend=="BULL": continue
 
                     if result.get("smt"):
-                        await tg(session,"TRAP on "+ticker+": "+result['smt']+" - Blocked!"); continue
+                        print("    TRAP on "+ticker+": "+result['smt']+" - immediate rescan")
+                        no_signal_count[ticker] = RESCAN_AFTER + 1  # trigger immediate rescan
+                        continue
 
                     rvol=calc_rvol(bars_1m,bars_yest)
                     multiday=get_multiday(bars_daily)
@@ -1242,20 +1275,21 @@ async def main():
                     bearish_patterns = ["Bearish Engulfing","Bearish Marubozu","Shooting Star","Evening Star"]
                     bullish_patterns  = ["Bullish Engulfing","Bullish Marubozu","Hammer","Morning Star"]
                     if result["signal"]=="BUY" and any(p in patterns for p in bearish_patterns):
-                        print("    BUY blocked - bearish pattern: "+str([p for p in patterns if p in bearish_patterns]))
-                        await tg(session,"BUY blocked on "+ticker+" - bearish pattern detected: "+", ".join([p for p in patterns if p in bearish_patterns]))
+                        print("    BUY blocked - bearish pattern on "+ticker)
                         continue
                     if result["signal"]=="SELL" and any(p in patterns for p in bullish_patterns):
-                        print("    SELL blocked - bullish pattern: "+str([p for p in patterns if p in bullish_patterns]))
-                        await tg(session,"SELL blocked on "+ticker+" - bullish pattern detected: "+", ".join([p for p in patterns if p in bullish_patterns]))
+                        print("    SELL blocked - bullish pattern on "+ticker)
                         continue
 
                     ai=await ai_confirm(session,ticker,result,patterns,sentiment,tf_agrees)
                     if ai.get("verdict")=="REJECTED":
-                        await tg(session,"AI REJECTED "+ticker+": "+ai.get("reason","")); continue
+                        print("    AI REJECTED "+ticker+": "+ai.get("reason",""))
+                        continue
 
                     yp,price_source=await get_realtime_price(session,ticker)
                     _,yc,_=await yahoo_price(session,ticker)
+                    # Get Finnhub day high/low for context
+                    _,fh_chg2,fh_day_high,fh_day_low=await get_finnhub_price(session,ticker)
 
                     # Price deviation filter
                     if yp and result['entry']:
@@ -1276,6 +1310,24 @@ async def main():
                     msg=build_msg(ticker,result,yp,yc,status,sentiment,headlines,patterns,ai,
                                   rvol,multiday,spy_trend,spy_chg,tf_agrees,orb_tag,shares,cost,leverage,st_data,price_source)
                     await tg(session,msg)
+
+                    # ── Finnhub accuracy check before trading ─────────
+                    # Get Finnhub price to confirm entry accuracy
+                    fh_price,fh_chg,fh_high,fh_low = await get_finnhub_price(session,ticker)
+                    if fh_price:
+                        fh_dev = abs(fh_price - result['entry']) / result['entry'] * 100
+                        print("    Finnhub confirm: $"+str(fh_price)+" vs entry $"+str(result['entry'])+" dev:"+str(round(fh_dev,1))+"%")
+                        if fh_dev > 1.5:
+                            print("    Finnhub: price moved too far - updating entry")
+                            result['entry'] = fh_price  # use Finnhub price as entry
+                        # Update SL/TP based on Finnhub price
+                        if result['atr']:
+                            if result['signal']=="BUY":
+                                result['sl'] = round(fh_price - result['atr']*1.5, 4)
+                                result['tp'] = round(fh_price + result['atr']*3.0, 4)
+                            else:
+                                result['sl'] = round(fh_price + result['atr']*1.5, 4)
+                                result['tp'] = round(fh_price - result['atr']*3.0, 4)
 
                     # AUTO TRADE
                     if AUTO_TRADE and shares>0:
