@@ -1367,24 +1367,28 @@ async def main():
                         print("    AI REJECTED "+ticker+": "+ai.get("reason",""))
                         continue
 
+                    # Get live price and ALWAYS use as entry
                     yp,price_source=await get_realtime_price(session,ticker)
                     _,yc,_=await yahoo_price(session,ticker)
-                    # Get Finnhub day high/low for context
-                    _,fh_chg2,fh_day_high,fh_day_low=await get_finnhub_price(session,ticker)
 
-                    # Price deviation filter - silent, just remove and replace
-                    if yp and result['entry']:
-                        dev=abs(yp-result['entry'])/result['entry']*100
-                        if result['signal']=="BUY" and yp>result['entry']*1.01:
-                            print("    EXPIRED "+ticker+" +"+str(round(dev,1))+"%")
-                            if ticker in watchlist: watchlist.remove(ticker)
-                            asyncio.ensure_future(replace_ticker(ticker))
-                            continue
-                        if result['signal']=="SELL" and yp<result['entry']*0.99:
-                            print("    EXPIRED "+ticker+" -"+str(round(dev,1))+"%")
-                            if ticker in watchlist: watchlist.remove(ticker)
-                            asyncio.ensure_future(replace_ticker(ticker))
-                            continue
+                    if not yp or yp <= 0:
+                        print("    No live price - skipping "+ticker)
+                        continue
+
+                    # Use live price as entry - recalculate SL/TP
+                    result['entry'] = yp
+                    atr = result.get('atr', 0)
+                    if atr and atr > 0:
+                        if result['signal']=="BUY":
+                            result['sl'] = round(yp - atr*1.5, 4)
+                            result['tp'] = round(yp + atr*3.0, 4)
+                        else:
+                            result['sl'] = round(yp + atr*1.5, 4)
+                            result['tp'] = round(yp - atr*3.0, 4)
+                    risk = abs(result['entry']-result['sl'])
+                    reward = abs(result['tp']-result['entry'])
+                    result['rr'] = "1:"+str(round(reward/risk,1)) if risk>0 else "N/A"
+                    print("    Live entry: $"+str(yp)+" ["+price_source+"] SL:$"+str(result['sl'])+" TP:$"+str(result['tp']))
 
                     # Calculate position with leverage
                     acct=await get_account_info(session)
