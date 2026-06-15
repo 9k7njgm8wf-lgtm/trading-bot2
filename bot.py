@@ -747,6 +747,65 @@ async def get_news(session, ticker):
             return ("NEGATIVE" if nc>pc else "POSITIVE" if pc>nc else "NEUTRAL"),headlines
     except: return "NEUTRAL",[]
 
+async def replace_ticker(removed_ticker):
+    """Immediately find and add a replacement stock when one is removed"""
+    print("Finding replacement for", removed_ticker)
+    async with aiohttp.ClientSession() as session:
+        try:
+            candidates = []
+            # Scan universe for best replacement
+            for ticker in SCAN_UNIVERSE:
+                if ticker in watchlist or ticker == removed_ticker: continue
+                try:
+                    p,chg,vol = await yahoo_price(session, ticker)
+                    if not p or not vol or p < 1: continue
+                    if abs(chg or 0) < 1: continue
+                    bars = await get_bars(session, ticker, "5Min", 20)
+                    if len(bars) < 10: continue
+                    closes = [b['c'] for b in bars]
+                    rsi = calc_rsi(closes)
+                    vol_r = calc_vol_ratio(bars)
+                    atr = calc_atr(bars)
+                    if not all([rsi, vol_r, atr]): continue
+                    atr_pct = (atr/p)*100
+                    # Good candidate: RSI not overbought, volume good, moving
+                    if 30 < rsi < 65 and vol_r >= 1.2 and atr_pct >= 1.5:
+                        score = 0
+                        if vol_r >= 2: score += 3
+                        elif vol_r >= 1.5: score += 2
+                        else: score += 1
+                        if atr_pct >= 4: score += 3
+                        elif atr_pct >= 2: score += 2
+                        else: score += 1
+                        if 35 <= rsi <= 55: score += 2  # ideal RSI range
+                        candidates.append({"ticker":ticker,"price":p,"change":chg,
+                                          "rsi":rsi,"vol_r":round(vol_r,1),
+                                          "atr_pct":round(atr_pct,1),"score":score})
+                    await asyncio.sleep(0.3)
+                except: continue
+
+            if candidates:
+                candidates.sort(key=lambda x: x['score'], reverse=True)
+                best = candidates[0]
+                watchlist.append(best['ticker'])
+                sign = "+" if best['change'] >= 0 else ""
+                msg = ("REPLACED "+removed_ticker+" (entry expired)\n\n"
+                       "New stock: "+best['ticker']+"\n"
+                       "Price: $"+str(best['price'])+" "+sign+str(best['change'])+"%\n"
+                       "RSI: "+str(best['rsi'])+" | RVOL: "+str(best['vol_r'])+"x\n"
+                       "ATR: "+str(best['atr_pct'])+"% | Score: "+str(best['score']))
+                await tg(session, msg)
+                print("Replaced", removed_ticker, "with", best['ticker'])
+            else:
+                # Re-add from defaults if no candidate found
+                for t in DEFAULT_WATCHLIST:
+                    if t not in watchlist:
+                        watchlist.append(t)
+                        await tg(session, removed_ticker+" removed. Re-added "+t+" from defaults.")
+                        break
+        except Exception as e:
+            print("Replace ticker error:", e)
+
 async def stocktwits_premarket_scan(session):
     """Scan Stocktwits during pre/after market for trending stocks"""
     lines = ["Pre/After Market Stocktwits Scan",""]
