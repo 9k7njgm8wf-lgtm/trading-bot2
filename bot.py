@@ -293,8 +293,27 @@ def calc_position_size(entry, sl, confidence, equity):
     risk_amt = equity * (RISK_PCT/100)
     rps = abs(entry-sl)
     if rps<=0: return 0,0,leverage
+
+    # Calculate shares based on risk
     shares = int(risk_amt/rps) * leverage
-    return shares, round(shares*entry,2), leverage
+
+    # If 0 shares (tight SL or expensive stock) - use minimum 1 share
+    if shares == 0:
+        if entry <= equity * 0.1:  # stock costs less than 10% of account
+            shares = max(1, leverage)
+        else:
+            shares = 1  # at least 1 share
+
+    # Safety check: never use more than 30% of account on one trade
+    max_cost = equity * 0.30
+    if shares * entry > max_cost:
+        shares = int(max_cost / entry)
+
+    # Minimum 1 share
+    if shares < 1: shares = 1
+
+    total_cost = round(shares * entry, 2)
+    return shares, total_cost, leverage
 
 # ── SMART DAILY SCANNER ───────────────────────────────────
 async def smart_daily_scan(session):
