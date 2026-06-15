@@ -22,11 +22,11 @@ DAILY_LOSS_LIMIT   = 5.0
 MAX_TRADES_PER_DAY = 6
 SCAN_INTERVAL      = 60
 SIGNAL_COOLDOWN    = 1800
-MIN_SCORE          = 5  # lowered to get more signals
+MIN_SCORE          = 4  # lowered further
 BEST_HOURS         = [(9,30,16,0)]  # full market hours 9:30 AM - 4:00 PM
 SPY_FILTER         = True
 TIME_FILTER        = False  # disabled - trade all market hours
-REQUIRE_3TF_AGREE  = True
+REQUIRE_3TF_AGREE  = False  # disabled - too strict
 CLOSE_ALL_TIME     = (15, 45)  # Close all positions at 3:45 PM NY
 
 # Leverage by confidence
@@ -63,7 +63,7 @@ DEFAULT_WATCHLIST = ["MARA", "SOUN", "RGTI", "RIOT", "BBAI"]
 # ── RESCAN STATE ─────────────────────────────────────────
 last_signal_found   = {}   # ticker -> last time signal was found
 no_signal_count     = {}   # ticker -> consecutive no-signal count
-RESCAN_AFTER        = 3    # rescan after 3 consecutive no-signals (3 min)
+RESCAN_AFTER        = 2    # rescan after 2 consecutive no-signals (2 min)
 
 # ── STATE ─────────────────────────────────────────────────
 last_signal_time     = {}
@@ -1445,7 +1445,7 @@ async def main():
             if status=="OPEN":
                 for ticker in list(watchlist):
                     count = no_signal_count.get(ticker, 0)
-                    if count >= 3:  # 3 consecutive no-signals = replace
+                    if count >= 2:  # 2 consecutive no-signals = replace
                         print("  No signal on "+ticker+" for "+str(count)+" scans - replacing")
                         if ticker in watchlist:
                             watchlist.remove(ticker)
