@@ -58,7 +58,7 @@ ALPACA_HEADERS       = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":A
 ALPACA_TRADE_HEADERS = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_SECRET,"Content-Type":"application/json"}
 
 # ── DEFAULT WATCHLIST (always has stocks) ─────────────────
-DEFAULT_WATCHLIST = ["MARA", "SOUN", "TSLA", "NVDA", "COIN"]
+DEFAULT_WATCHLIST = ["MARA", "SOUN", "RGTI", "RIOT", "BBAI"]
 
 # ── RESCAN STATE ─────────────────────────────────────────
 last_signal_found   = {}   # ticker -> last time signal was found
@@ -377,12 +377,12 @@ async def smart_daily_scan(session):
             if not atr: continue
             atr_pct = (atr/p)*100
 
-            # Skip if price too low or too high
-            if p < 1 or p > 500: continue
+            # Skip if price out of range (sweet spot $2-$100)
+            if p < 2 or p > 100: continue
             # Skip if no volume
-            if rvol < 0.8: continue
+            if rvol < 1.0: continue
             # Skip if not moving
-            if abs(chg) < 0.5: continue
+            if abs(chg) < 1.0: continue
 
             # Scoring
             score = 0
@@ -768,8 +768,8 @@ async def replace_ticker(removed_ticker):
                     atr = calc_atr(bars)
                     if not all([rsi, vol_r, atr]): continue
                     atr_pct = (atr/p)*100
-                    # Good candidate: RSI good range, volume up, price moving UP
-                    if 30 < rsi < 60 and vol_r >= 1.5 and atr_pct >= 1.5 and (chg or 0) > 0:
+                    # Good candidate: affordable, good RSI, volume, moving up
+                    if 30 < rsi < 60 and vol_r >= 1.3 and atr_pct >= 1.5 and (chg or 0) > 0 and p < 100:
                         score = 0
                         if vol_r >= 2: score += 3
                         elif vol_r >= 1.5: score += 2
@@ -1307,7 +1307,7 @@ async def main():
 
                     # SMT handled by score penalty in compute_signal
                     if result.get("smt"):
-                        print("    "+ticker+" has "+str(result['smt'])+" - score penalised")
+                        print("    "+ticker+" SMT: "+str(result['smt'])+" - score penalised, continuing")
 
                     rvol=calc_rvol(bars_1m,bars_yest)
                     multiday=get_multiday(bars_daily)
