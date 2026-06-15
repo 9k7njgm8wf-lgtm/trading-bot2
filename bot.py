@@ -741,12 +741,23 @@ async def ai_confirm(session, ticker, result, patterns, sentiment, tf_agrees):
     try:
         async with session.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization":"Bearer "+GROQ_API_KEY,"Content-Type":"application/json"},
-            json={"model":"llama-3.3-70b-versatile","messages":[{"role":"user","content":prompt}],"max_tokens":150,"temperature":0.1},
-            timeout=aiohttp.ClientTimeout(total=10)) as r:
+            json={"model":"llama-3.3-70b-versatile","messages":[{"role":"user","content":prompt}],"max_tokens":200,"temperature":0.1},
+            timeout=aiohttp.ClientTimeout(total=15)) as r:
             data=await r.json()
-            raw=data["choices"][0]["message"]["content"].strip().replace("```json","").replace("```","")
+            if "choices" not in data:
+                print("Groq API error:", data)
+                return {"verdict":"CONFIRMED","reason":"AI rate limited","tip":"Check signal manually"}
+            raw=data["choices"][0]["message"]["content"].strip()
+            # Clean up response
+            raw=raw.replace("```json","").replace("```","").strip()
+            # Find JSON in response
+            start=raw.find("{"); end=raw.rfind("}")+1
+            if start>=0 and end>start:
+                raw=raw[start:end]
             return json.loads(raw)
-    except: return {"verdict":"CONFIRMED","reason":"AI unavailable","tip":"Use your judgment"}
+    except Exception as e:
+        print("Groq error:",e)
+        return {"verdict":"CONFIRMED","reason":"AI temporarily unavailable","tip":"Use your judgment"}
 
 # ── BUILD MESSAGE ─────────────────────────────────────────
 def build_msg(ticker, result, yp, yc, status, sentiment, headlines, patterns, ai, rvol, multiday, spy_trend, spy_chg, tf_agrees, orb_tag, shares, cost, leverage, st_data, price_source):
@@ -1148,6 +1159,31 @@ async def main():
 
                     st_data=await get_stocktwits(session,ticker)
                     if st_data["sentiment"]=="BEARISH" and st_data["bear_pct"]>=70 and result["signal"]=="BUY": continue
+
+                    # Block BUY when RSI overbought or SELL when oversold
+                    if result["signal"]=="BUY" and result.get("rsi") and result["rsi"] > 70:
+                        print("    BUY blocked - RSI overbought: "+str(result['rsi']))
+                        continue
+                    if result["signal"]=="SELL" and result.get("rsi") and result["rsi"] < 30:
+                        print("    SELL blocked - RSI oversold: "+str(result['rsi']))
+                        continue
+
+                    # Block BUY when price in PREMIUM zone with high RSI
+                    if result["signal"]=="BUY" and result.get("zone")=="PREMIUM" and result.get("rsi",0)>65:
+                        print("    BUY blocked - PREMIUM zone + high RSI")
+                        continue
+
+                    # Block BUY on strong bearish candlestick patterns
+                    bearish_patterns = ["Bearish Engulfing","Bearish Marubozu","Shooting Star","Evening Star"]
+                    bullish_patterns  = ["Bullish Engulfing","Bullish Marubozu","Hammer","Morning Star"]
+                    if result["signal"]=="BUY" and any(p in patterns for p in bearish_patterns):
+                        print("    BUY blocked - bearish pattern: "+str([p for p in patterns if p in bearish_patterns]))
+                        await tg(session,"BUY blocked on "+ticker+" - bearish pattern detected: "+", ".join([p for p in patterns if p in bearish_patterns]))
+                        continue
+                    if result["signal"]=="SELL" and any(p in patterns for p in bullish_patterns):
+                        print("    SELL blocked - bullish pattern: "+str([p for p in patterns if p in bullish_patterns]))
+                        await tg(session,"SELL blocked on "+ticker+" - bullish pattern detected: "+", ".join([p for p in patterns if p in bullish_patterns]))
+                        continue
 
                     ai=await ai_confirm(session,ticker,result,patterns,sentiment,tf_agrees)
                     if ai.get("verdict")=="REJECTED":
