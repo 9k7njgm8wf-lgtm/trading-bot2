@@ -23,9 +23,9 @@ MAX_TRADES_PER_DAY = 6
 SCAN_INTERVAL      = 60
 SIGNAL_COOLDOWN    = 1800
 MIN_SCORE          = 5  # lowered to get more signals
-BEST_HOURS         = [(9,30,11,30),(13,0,14,0),(15,0,16,0)]  # added 1-2pm window
+BEST_HOURS         = [(9,30,16,0)]  # full market hours 9:30 AM - 4:00 PM
 SPY_FILTER         = True
-TIME_FILTER        = True
+TIME_FILTER        = False  # disabled - trade all market hours
 REQUIRE_3TF_AGREE  = True
 CLOSE_ALL_TIME     = (15, 45)  # Close all positions at 3:45 PM NY
 
@@ -59,6 +59,11 @@ ALPACA_TRADE_HEADERS = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":A
 
 # ── DEFAULT WATCHLIST (always has stocks) ─────────────────
 DEFAULT_WATCHLIST = ["RGTI", "MARA", "SOUN", "TSLA", "NVDA"]
+
+# ── RESCAN STATE ─────────────────────────────────────────
+last_signal_found   = {}   # ticker -> last time signal was found
+no_signal_count     = {}   # ticker -> consecutive no-signal count
+RESCAN_AFTER        = 3    # rescan after 3 consecutive no-signals (3 min)
 
 # ── STATE ─────────────────────────────────────────────────
 last_signal_time     = {}
@@ -711,6 +716,43 @@ async def get_news(session, ticker):
             return ("NEGATIVE" if nc>pc else "POSITIVE" if pc>nc else "NEUTRAL"),headlines
     except: return "NEUTRAL",[]
 
+async def stocktwits_premarket_scan(session):
+    """Scan Stocktwits during pre/after market for trending stocks"""
+    lines = ["Pre/After Market Stocktwits Scan",""]
+    hot_stocks = []
+    
+    # Check all watchlist + popular stocks
+    scan_list = list(set(list(watchlist) + list(DEFAULT_WATCHLIST)))
+    
+    for ticker in scan_list:
+        try:
+            st = await get_stocktwits(session, ticker)
+            if st["total"] >= 5 and st["sentiment"] != "NEUTRAL":
+                if st["bull_pct"] >= 70 or st["bear_pct"] >= 70:
+                    hot_stocks.append({
+                        "ticker": ticker,
+                        "sentiment": st["sentiment"],
+                        "bull_pct": st["bull_pct"],
+                        "trending": st["trending"],
+                        "top_post": st["top_post"]
+                    })
+            await asyncio.sleep(0.5)
+        except: continue
+    
+    if hot_stocks:
+        hot_stocks.sort(key=lambda x: x["bull_pct"] if x["sentiment"]=="BULLISH" else x["bear_pct"], reverse=True)
+        lines.append("Hot stocks right now:")
+        for h in hot_stocks[:5]:
+            se = "BULLISH" if h["sentiment"]=="BULLISH" else "BEARISH"
+            trend = " TRENDING" if h["trending"] else ""
+            lines.append(h["ticker"]+" - "+se+trend+" | "+str(h["bull_pct"])+"% Bulls")
+            if h["top_post"]: lines.append("  "+h["top_post"][:60])
+        lines.append("")
+        lines.append("Watch these at market open!")
+        await tg(session, "\n".join(lines))
+    else:
+        print("No hot stocks on Stocktwits pre/after market")
+
 async def get_stocktwits(session, ticker):
     try:
         now=get_ny(); last=stocktwits_cooldown.get(ticker)
@@ -1077,6 +1119,16 @@ async def main():
             # Reset daily at midnight
             if ny.hour==0 and ny.minute==0: reset_daily()
 
+            # Pre-market Stocktwits scan at 8:00 AM NY (1:00 PM UK)
+            if ny.hour==8 and ny.minute==0 and ny.weekday()<5:
+                try: await stocktwits_premarket_scan(session)
+                except Exception as e: print("Pre-market scan err:",e)
+
+            # After-market Stocktwits scan at 4:30 PM NY (9:30 PM UK)
+            if ny.hour==16 and ny.minute==30 and ny.weekday()<5:
+                try: await stocktwits_premarket_scan(session)
+                except Exception as e: print("After-market scan err:",e)
+
             # Smart daily scan at 9:20 AM NY (only once per day)
             if ny.hour==9 and ny.minute==20 and ny.weekday()<5 and ny.day!=last_scan_day:
                 last_scan_day=ny.day  # set FIRST to prevent duplicate
@@ -1124,11 +1176,13 @@ async def main():
 
             print("["+ny.strftime("%H:%M:%S")+" NY]",status,"|",watchlist)
 
+            # Track no-signal count per ticker for rescan
+            all_no_signal = True
+
             for ticker in list(watchlist):
                 try:
                     can,reason=check_daily_limits()
                     if not can: print("  BLOCKED:",reason); break
-                    if TIME_FILTER and not is_best_hour(): continue
 
                     bars_1m,bars_5m,bars_15m,bars_daily,bars_yest=await asyncio.gather(
                         get_bars(session,ticker,"1Min",30),
@@ -1142,9 +1196,12 @@ async def main():
                     result=compute_signal(bars_1m,bars_5m,bars_15m)
                     if result is None:
                         print("    WAIT - no signal")
+                        no_signal_count[ticker] = no_signal_count.get(ticker,0) + 1
                         continue
                     score = result['buy_score'] if result.get('signal')=='BUY' else result.get('sell_score',0)
                     print("    Signal found:",result.get('signal'),"Score:"+str(score),"RSI:"+str(result.get('rsi')),"Zone:"+str(result.get('zone')))
+                    no_signal_count[ticker] = 0  # reset on signal found
+                    all_no_signal = False
                     if is_duplicate(ticker,result["signal"]): print("    Duplicate - skipping"); continue
 
                     tf_agrees=check_3tf(bars_1m,bars_5m,bars_15m,result["signal"])
@@ -1256,6 +1313,39 @@ async def main():
                     await asyncio.sleep(2)
 
                 except Exception as e: print("  ERROR",ticker,":",e); continue
+
+            # ── 5-min rescan if no signals found ─────────────────
+            # Check if any ticker has been no-signal for 5+ minutes
+            tickers_to_rescan = [t for t,c in no_signal_count.items() if c >= 5]
+            if tickers_to_rescan and status=="OPEN":
+                print("  Rescanning - no signals for 5+ min on:", tickers_to_rescan)
+                await tg(session, "No signals on "+", ".join(tickers_to_rescan)+" for 5 min - scanning for better opportunities...")
+                # Quick scan for replacements
+                new_picks = []
+                for ticker in SCAN_UNIVERSE[:20]:  # quick scan top 20
+                    if ticker in watchlist: continue
+                    try:
+                        p,chg,vol=await yahoo_price(session,ticker)
+                        if not p or abs(chg or 0)<1: continue
+                        bars=await get_bars(session,ticker,"5Min",20)
+                        if len(bars)<10: continue
+                        closes=[b['c'] for b in bars]
+                        rsi=calc_rsi(closes); vol_r=calc_vol_ratio(bars)
+                        if rsi and vol_r and 30<rsi<70 and vol_r>1.2:
+                            new_picks.append({"ticker":ticker,"price":p,"change":chg,"rsi":rsi,"vol_r":vol_r})
+                        await asyncio.sleep(0.3)
+                    except: continue
+                if new_picks:
+                    new_picks.sort(key=lambda x:x['vol_r'],reverse=True)
+                    best=new_picks[0]
+                    # Replace worst performing ticker
+                    if tickers_to_rescan and tickers_to_rescan[0] in watchlist:
+                        old_ticker=tickers_to_rescan[0]
+                        watchlist.remove(old_ticker)
+                        watchlist.append(best['ticker'])
+                        no_signal_count[old_ticker]=0
+                        await tg(session,"Replaced "+old_ticker+" with "+best['ticker']+" ($"+str(best['price'])+" RVOL:"+str(round(best['vol_r'],1))+"x RSI:"+str(best['rsi'])+")")
+                        print("  Replaced",old_ticker,"with",best['ticker'])
 
             await asyncio.sleep(SCAN_INTERVAL)
 
