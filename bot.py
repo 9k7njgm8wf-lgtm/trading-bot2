@@ -1203,6 +1203,18 @@ async def main():
             "Risk per trade: "+str(RISK_PCT)+"% = $"+str(round(ACCOUNT_SIZE*RISK_PCT/100,2))+"\n\n"
             "/help for all commands")
 
+        # If market is open on startup, immediately scan for best stocks
+        if market_status() == "OPEN":
+            print("Market is open - running immediate scan on startup")
+            try:
+                new_wl = await smart_daily_scan(session)
+                if new_wl:
+                    watchlist.clear()
+                    watchlist.extend(new_wl)
+                    print("Startup scan complete:", watchlist)
+            except Exception as e:
+                print("Startup scan error:", e)
+
         while True:
             try: last_update_id=await handle_cmds(session,last_update_id)
             except Exception as e: print("CMD err:",e)
