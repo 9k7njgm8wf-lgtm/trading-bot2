@@ -22,7 +22,7 @@ DAILY_LOSS_LIMIT   = 5.0
 MAX_TRADES_PER_DAY = 6
 SCAN_INTERVAL      = 60
 SIGNAL_COOLDOWN    = 1800
-MIN_SCORE          = 7
+MIN_SCORE          = 5  # lowered to get more signals
 BEST_HOURS         = [(9,30,11,0),(15,0,16,0)]
 SPY_FILTER         = True
 TIME_FILTER        = True
@@ -1140,8 +1140,12 @@ async def main():
                     if len(bars_5m)<20: continue
                     update_orb(ticker,bars_1m)
                     result=compute_signal(bars_1m,bars_5m,bars_15m)
-                    if result is None: print("    WAIT"); continue
-                    if is_duplicate(ticker,result["signal"]): print("    Duplicate"); continue
+                    if result is None:
+                        print("    WAIT - no signal")
+                        continue
+                    score = result['buy_score'] if result.get('signal')=='BUY' else result.get('sell_score',0)
+                    print("    Signal found:",result.get('signal'),"Score:"+str(score),"RSI:"+str(result.get('rsi')),"Zone:"+str(result.get('zone')))
+                    if is_duplicate(ticker,result["signal"]): print("    Duplicate - skipping"); continue
 
                     tf_agrees=check_3tf(bars_1m,bars_5m,bars_15m,result["signal"])
                     if REQUIRE_3TF_AGREE and tf_agrees<2: continue
