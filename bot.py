@@ -57,6 +57,9 @@ ALPACA_TRADE_BASE    = "https://paper-api.alpaca.markets"
 ALPACA_HEADERS       = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_SECRET}
 ALPACA_TRADE_HEADERS = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_SECRET,"Content-Type":"application/json"}
 
+# ── DEFAULT WATCHLIST (always has stocks) ─────────────────
+DEFAULT_WATCHLIST = ["RGTI", "MARA", "SOUN", "TSLA", "NVDA"]
+
 # ── STATE ─────────────────────────────────────────────────
 last_signal_time     = {}
 last_signal_type     = {}
@@ -64,7 +67,7 @@ orb_levels           = {}
 active_trades        = {}
 performance_log      = []
 all_time_log         = []
-watchlist            = []           # set daily by scanner
+watchlist            = list(DEFAULT_WATCHLIST)  # always starts with defaults
 daily_picks          = []           # today's top stocks
 bot_paused           = False
 trailing_stops       = {}
@@ -121,8 +124,9 @@ def check_daily_limits():
 def reset_daily():
     global trades_today, daily_pnl, losing_streak, positions_closed_today, daily_picks, watchlist
     trades_today=0; daily_pnl=0.0; positions_closed_today=False
-    daily_picks=[]; watchlist=[]
-    print("Daily stats reset")
+    daily_picks=[]
+    watchlist=list(DEFAULT_WATCHLIST)  # reset to defaults not empty!
+    print("Daily stats reset - watchlist:", watchlist)
 
 # ── TELEGRAM ─────────────────────────────────────────────
 async def tg(session, msg):
@@ -368,8 +372,10 @@ async def smart_daily_scan(session):
     top3 = candidates[:3]
 
     if not top3:
-        await tg(session, "⚠️ Scanner: No strong candidates today.\nKeeping previous watchlist.")
-        return watchlist if watchlist else []
+        # Use default watchlist if scanner finds nothing
+        default = list(DEFAULT_WATCHLIST)
+        await tg(session, "Scanner: No strong candidates found.\nUsing default watchlist: "+", ".join(default))
+        return default
 
     daily_picks = top3
     new_watchlist = [c['ticker'] for c in top3]
@@ -909,6 +915,24 @@ async def handle_cmds(session, offset):
                        "Today's picks: "+", ".join([c['ticker'] for c in daily_picks]) if daily_picks else "Today's picks: Not scanned yet",
                        "Active: "+al]
                 await tg(session,"\n".join(lines))
+            elif text.startswith("/add "):
+                try:
+                    t=text.split()[1].upper()
+                    if t not in watchlist:
+                        watchlist.append(t)
+                        await tg(session,"Added "+t+"! Watching: "+", ".join(watchlist))
+                    else:
+                        await tg(session,t+" already in watchlist: "+", ".join(watchlist))
+                except: await tg(session,"Usage: /add RGTI")
+            elif text.startswith("/remove "):
+                try:
+                    t=text.split()[1].upper()
+                    if t in watchlist:
+                        watchlist.remove(t)
+                        await tg(session,"Removed "+t+". Watching: "+", ".join(watchlist))
+                    else:
+                        await tg(session,t+" not in watchlist")
+                except: await tg(session,"Usage: /remove RGTI")
             elif text=="/autotrade on": AUTO_TRADE=True; await tg(session,"Auto-trading ENABLED [PAPER MODE]")
             elif text=="/autotrade off": AUTO_TRADE=False; await tg(session,"Auto-trading DISABLED - signals only")
             elif text=="/account":
@@ -941,7 +965,7 @@ async def handle_cmds(session, offset):
             elif text=="/scan":
                 new_wl=await smart_daily_scan(session)
                 watchlist.clear(); watchlist.extend(new_wl)
-            elif text=="/watchlist": await tg(session,"Today's picks: "+", ".join(watchlist) if watchlist else "No picks yet - run /scan")
+            elif text=="/watchlist": await tg(session,"Watching: "+", ".join(watchlist) if watchlist else "Empty - send /add TICKER")
             elif text=="/pause": bot_paused=True; await tg(session,"Bot paused.")
             elif text=="/resume": bot_paused=False; await tg(session,"Bot resumed!")
             elif text=="/report": await daily_report(session)
