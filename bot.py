@@ -46,18 +46,20 @@ ALPACA_LIVE_HEADERS  = {"APCA-API-KEY-ID": ALPACA_LIVE_KEY,  "APCA-API-SECRET-KE
 ALPACA_TRADE_HEADERS = {"APCA-API-KEY-ID": ALPACA_API_KEY,   "APCA-API-SECRET-KEY": ALPACA_SECRET, "Content-Type": "application/json"}
 
 # ── SCAN UNIVERSE ─────────────────────────────────────────
+# Note: removed delisted/bankrupt tickers (NKLA, GOEV, FSR, RIDE, WKHS,
+# HYZN, CLVS, PTRA) — they caused empty Yahoo responses. Replaced with
+# currently-active, liquid small/mid caps.
 SMALL_CAPS = [
     "RXT","QUBT","LUNR","BBAI","SOUN","KULR","MARA","RIOT","CLSK","HOOD",
-    "HIMS","RKLB","ASTS","ACHR","JOBY","NKLA","BLNK","PLUG","FCEL","SPCE",
-    "NVAX","ACAD","ITCI","CLOV","WKHS","HYZN","GOEV","RIDE","MVIS","OCGN",
-    "AGEN","CTIC","CYTO","DARE","SINT","FREQ","SENS","CLVS","AMPIO","OBSV",
-    "AVDL","BTBT","BYFC","CANF","CEAD"
+    "HIMS","RKLB","ASTS","ACHR","JOBY","BLNK","PLUG","FCEL","NVAX","ACAD",
+    "ITCI","CLOV","MVIS","OCGN","AGEN","CTIC","SENS","AMPIO","OBSV","AVDL",
+    "BTBT","RGTI","IONQ","AISP","SMR","OKLO","CIFR","WULF","BITF","HUT"
 ]
 MID_CAPS = [
     "MSTR","COIN","HOOD","SOFI","AFRM","UPST","OPEN","CVNA","DKNG","PENN",
-    "CHWY","RIVN","LCID","FSR","PTRA","XPEV","NIO","LI","RBLX","SKLZ",
-    "MTCH","BMBL","SNAP","PINS","ZM","PTON","ROKU","FUBO","SFIX","REAL",
-    "POSH","SE","GRAB","BARK","VUZI","KRTX","ACMR","AEHR","AKBA","ALDX"
+    "CHWY","RIVN","LCID","XPEV","NIO","LI","RBLX","MTCH","BMBL","SNAP",
+    "PINS","ZM","PTON","ROKU","FUBO","SE","GRAB","BARK","KRTX","ACMR",
+    "AEHR","AKBA","ALDX","PLTR","SMCI","ARM","DELL","SNOW","NET","DDOG"
 ]
 SCAN_UNIVERSE   = list(set(SMALL_CAPS + MID_CAPS))
 DEFAULT_WATCHLIST = ["MARA", "SOUN", "RIOT", "BBAI", "MSTR"]
@@ -200,11 +202,26 @@ async def yahoo_price(session: aiohttp.ClientSession, ticker: str):
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=aiohttp.ClientTimeout(total=8)
         ) as r:
-            data = await r.json()
-            meta  = data["chart"]["result"][0]["meta"]
-            price = meta["regularMarketPrice"]
-            prev  = meta["chartPreviousClose"]
+            if r.status == 429:
+                log(f"yahoo_price {ticker}: rate limited (429)")
+                return None, None, None
+            try:
+                data = await r.json()
+            except Exception:
+                return None, None, None
+
+            # Defensive parsing — any missing layer returns None cleanly
+            chart  = (data or {}).get("chart") or {}
+            result = chart.get("result")
+            if not result:
+                # Yahoo returns {"chart":{"result":null,"error":{...}}} for bad/delisted tickers
+                return None, None, None
+            meta = (result[0] or {}).get("meta") or {}
+            price = meta.get("regularMarketPrice")
+            prev  = meta.get("chartPreviousClose")
             vol   = meta.get("regularMarketVolume", 0)
+            if price is None or prev is None or prev == 0:
+                return None, None, None
             return round(price, 4), round(((price - prev) / prev) * 100, 2), vol
     except Exception as e:
         log(f"yahoo_price {ticker}: {e}")
@@ -596,7 +613,7 @@ async def smart_daily_scan(session: aiohttp.ClientSession):
                     "spy_aligned": (spy_trend == "BULL" and chg > 0) or (spy_trend == "BEAR" and chg < 0),
                 })
 
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.4)  # gentler on Yahoo to avoid 429 rate-limiting
         except Exception as e:
             log(f"scan {ticker}: {e}")
             continue
