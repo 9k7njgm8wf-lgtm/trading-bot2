@@ -571,11 +571,8 @@ async def smart_daily_scan(session: aiohttp.ClientSession):
                 continue
             atr_pct = (atr / p) * 100
 
+            # Hard exclusions only: bad price range (can't size / too illiquid)
             if p < 2 or p > 100:
-                continue
-            if rvol < 1.0:
-                continue
-            if abs(chg) < 1.0:
                 continue
 
             score = 0
@@ -583,7 +580,7 @@ async def smart_daily_scan(session: aiohttp.ClientSession):
             elif rvol >= 3:      score += 4
             elif rvol >= 2:      score += 3
             elif rvol >= 1.5:    score += 2
-            else:                score += 1
+            elif rvol >= 1.0:    score += 1
 
             if atr_pct >= 8:     score += 4
             elif atr_pct >= 5:   score += 3
@@ -601,36 +598,43 @@ async def smart_daily_scan(session: aiohttp.ClientSession):
             if 5 <= p <= 50:       score += 2
             elif 2 <= p < 5 or 50 < p <= 100: score += 1
 
-            if score >= 3:
-                candidates.append({
-                    "ticker":      ticker,
-                    "price":       p,
-                    "change":      chg,
-                    "vol":         vol,
-                    "rvol":        round(rvol, 1),
-                    "atr_pct":     round(atr_pct, 1),
-                    "score":       score,
-                    "spy_aligned": (spy_trend == "BULL" and chg > 0) or (spy_trend == "BEAR" and chg < 0),
-                })
+            # Keep EVERY stock that returned valid data. We always want the
+            # best-available picks, never a fallback to the same defaults.
+            candidates.append({
+                "ticker":      ticker,
+                "price":       p,
+                "change":      chg,
+                "vol":         vol,
+                "rvol":        round(rvol, 1),
+                "atr_pct":     round(atr_pct, 1),
+                "score":       score,
+                "spy_aligned": (spy_trend == "BULL" and chg > 0) or (spy_trend == "BEAR" and chg < 0),
+            })
 
             await asyncio.sleep(0.4)  # gentler on Yahoo to avoid 429 rate-limiting
         except Exception as e:
             log(f"scan {ticker}: {e}")
             continue
 
-    candidates.sort(key=lambda x: x["score"], reverse=True)
+    # Sort by score, then by RVOL as a tiebreaker (most active first)
+    candidates.sort(key=lambda x: (x["score"], x["rvol"]), reverse=True)
     top3 = candidates[:3]
 
     if not top3:
+        # Only reached if data fetching totally failed for the whole universe.
         default = list(DEFAULT_WATCHLIST)
-        await tg(session, "Scanner: No strong candidates.\nUsing defaults: " + ", ".join(default))
+        await tg(session, "⚠️ Scanner: data unavailable for all stocks.\nUsing defaults: " + ", ".join(default))
         return default
 
     daily_picks = top3
     new_watchlist = [c["ticker"] for c in top3]
 
+    # Flag whether today's picks are genuinely strong or just "best of a quiet day"
+    strong = top3[0]["score"] >= 6
+    quiet_note = "" if strong else " (quiet day — best available)"
+
     sign = lambda v: "+" if v >= 0 else ""
-    lines = ["🔍 <b>Daily Smart Scan Complete!</b>", "",
+    lines = ["🔍 <b>Daily Smart Scan Complete!</b>" + quiet_note, "",
              f"SPY: {spy_trend} {sign(spy_chg)}{spy_chg}%", "",
              "<b>Today's Top 3 Picks:</b>", ""]
     for i, c in enumerate(top3, 1):
