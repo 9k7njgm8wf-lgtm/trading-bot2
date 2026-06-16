@@ -7,35 +7,34 @@ from datetime import datetime, timezone, timedelta
 import os
 
 # ── CONFIG (from Railway environment variables) ───────────
-# Secrets live ONLY in Railway → Variables. No fallbacks in code.
-# If a variable is missing the bot crashes on startup (intended).
-def _require(name):
-    val = os.environ.get(name)
-    if not val:
-        raise RuntimeError(
-            "Missing required environment variable: " + name +
-            " — set it in Railway → Variables tab."
-        )
-    return val
+FINNHUB_API_KEY  = os.environ.get("FINNHUB_API_KEY",  "d8mpeg1r01qn3046mvtgd8mpeg1r01qn3046mvu0")
+GROQ_API_KEY     = os.environ.get("GROQ_API_KEY",     "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")
 
-FINNHUB_API_KEY  = _require("FINNHUB_API_KEY")
-GROQ_API_KEY     = _require("GROQ_API_KEY")
-ALPACA_API_KEY   = _require("ALPACA_API_KEY")
-ALPACA_SECRET    = _require("ALPACA_SECRET")
-TELEGRAM_TOKEN   = _require("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = _require("TELEGRAM_CHAT_ID")
+# PAPER keys - for placing trades (safe, no real money)
+ALPACA_API_KEY   = os.environ.get("ALPACA_API_KEY",   "PKHY4LGTE2AF3PCURW4JJB423B")
+ALPACA_SECRET    = os.environ.get("ALPACA_SECRET",    "7NwLWDCxprL794BdsCheM9CB8D4VAi2GSqKTgfovv3Ws")
+
+# LIVE keys - for real-time SIP market data (analysis only, NO trading)
+ALPACA_LIVE_KEY    = os.environ.get("ALPACA_LIVE_KEY",    "AKPYM4PLBJBOEBSD3NQQVEDALI")
+ALPACA_LIVE_SECRET = os.environ.get("ALPACA_LIVE_SECRET", "6Z73eeNG8Fpa64Tw7UBaEULCyFHJRCSh6r3kRgC7k2qo")
+
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "8855798705:AAFuUv_mpafzcaSKwnsye1bgYHLomJS2SAU")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "6903579390")
+
+# Headers for live data requests (real-time SIP feed)
+ALPACA_LIVE_HEADERS = {"APCA-API-KEY-ID":ALPACA_LIVE_KEY,"APCA-API-SECRET-KEY":ALPACA_LIVE_SECRET}
 
 # ── TRADING CONFIG ────────────────────────────────────────
 AUTO_TRADE         = True
 PAPER_TRADING      = True
-ACCOUNT_SIZE       = 10000   # fallback only; real equity auto-synced from Alpaca on startup
+ACCOUNT_SIZE       = 10000
 RISK_PCT           = 2
 MAX_OPEN_TRADES    = 10
-DAILY_LOSS_LIMIT   = 5.0     # % of equity; halts new trades for the day when hit
-MAX_TRADES_PER_DAY = 20      # churn guardrail — more trades is NOT more profit
-SCAN_INTERVAL      = 60      # scan every 60 seconds (1 minute)
-SIGNAL_COOLDOWN    = 1800    # 30 min per-ticker cooldown — prevents overtrading the same name
-MIN_SCORE          = 8       # quality gate — keep high; fewer, better setups win
+DAILY_LOSS_LIMIT   = 5.0
+MAX_TRADES_PER_DAY = 20
+SCAN_INTERVAL      = 30  # scan every 30 seconds
+SIGNAL_COOLDOWN    = 1800
+MIN_SCORE          = 8
 BEST_HOURS         = [(9,30,16,0)]
 SPY_FILTER         = True
 TIME_FILTER        = False
@@ -68,7 +67,10 @@ SCAN_UNIVERSE = list(set(SMALL_CAPS + MID_CAPS))
 # ── ALPACA ENDPOINTS ──────────────────────────────────────
 ALPACA_BASE          = "https://data.alpaca.markets/v2"
 ALPACA_TRADE_BASE    = "https://paper-api.alpaca.markets"
-ALPACA_HEADERS       = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_SECRET}
+# DATA headers use LIVE keys for real-time SIP feed
+# DATA requests use LIVE keys for real-time SIP feed
+ALPACA_HEADERS       = {"APCA-API-KEY-ID":ALPACA_LIVE_KEY,"APCA-API-SECRET-KEY":ALPACA_LIVE_SECRET}
+# TRADE headers use PAPER keys for safe order execution
 ALPACA_TRADE_HEADERS = {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_SECRET,"Content-Type":"application/json"}
 
 # ── DEFAULT WATCHLIST (always has stocks) ─────────────────
@@ -104,22 +106,8 @@ stocktwits_cooldown  = {}
 positions_closed_today = False
 
 # ── TIME ──────────────────────────────────────────────────
-# Use real America/New_York zone so EST/EDT (DST) is handled automatically.
-# The old hard-coded -4 offset was wrong Nov-Mar and shifted all market hours by 1h.
-try:
-    from zoneinfo import ZoneInfo
-    _NY_TZ = ZoneInfo("America/New_York")
-    def get_ny():
-        return datetime.now(_NY_TZ)
-except Exception:
-    # Fallback: approximate DST (2nd Sun Mar - 1st Sun Nov) if zoneinfo unavailable
-    def get_ny():
-        u = datetime.now(timezone.utc)
-        y = u.year
-        # DST roughly mid-March to early-November
-        dst = (3, 8) <= (u.month, u.day) or u.month in (4,5,6,7,8,9,10) or (u.month, u.day) <= (11, 1)
-        offset = -4 if dst else -5
-        return u + timedelta(hours=offset)
+def get_ny():
+    return datetime.now(timezone.utc) + timedelta(hours=-4)
 
 def market_status():
     ny = get_ny()
@@ -193,7 +181,7 @@ async def yahoo_price(session, ticker):
 async def get_alpaca_price(session, ticker):
     try:
         async with session.get(ALPACA_BASE+"/stocks/"+ticker+"/trades/latest",
-            headers=ALPACA_HEADERS, params={"feed":"sip"},
+            headers=ALPACA_LIVE_HEADERS, params={"feed":"sip"},
             timeout=aiohttp.ClientTimeout(total=5)) as r:
             data = await r.json()
             price = data.get("trade",{}).get("p")
@@ -247,7 +235,7 @@ async def get_spy_trend(session):
 async def get_bars(session, ticker, tf="5Min", limit=50):
     try:
         async with session.get(ALPACA_BASE+"/stocks/"+ticker+"/bars",
-            headers=ALPACA_HEADERS,
+            headers=ALPACA_LIVE_HEADERS,
             params={"timeframe":tf,"limit":limit,"feed":"sip"}) as r:
             return (await r.json()).get("bars",[])
     except: return []
@@ -292,7 +280,7 @@ async def alpaca_websocket():
                     try:
                         async with session.get(
                             ALPACA_BASE+"/stocks/"+ticker+"/trades/latest",
-                            headers=ALPACA_HEADERS,
+                            headers=ALPACA_LIVE_HEADERS,
                             params={"feed":"sip"},
                             timeout=aiohttp.ClientTimeout(total=3)
                         ) as r:
@@ -317,25 +305,8 @@ async def get_account_info(session):
             data = await r.json()
             return {"equity":round(float(data.get("equity",0)),2),
                     "buying_power":round(float(data.get("buying_power",0)),2),
-                    "cash":round(float(data.get("cash",0)),2),
-                    "last_equity":round(float(data.get("last_equity",0)),2)}
+                    "cash":round(float(data.get("cash",0)),2)}
     except Exception as e: print("Account error:",e); return None
-
-async def sync_equity_and_pnl(session):
-    """Pull REAL equity and REAL daily P&L from Alpaca.
-    Replaces the old estimated daily_pnl so the loss limit actually works."""
-    global ACCOUNT_SIZE, daily_pnl
-    acct = await get_account_info(session)
-    if not acct:
-        return None
-    # Sync real account size for position sizing
-    if acct["equity"] > 0:
-        ACCOUNT_SIZE = acct["equity"]
-    # Real daily P&L % = (equity - equity at last close) / last close
-    le = acct.get("last_equity", 0)
-    if le > 0:
-        daily_pnl = round((acct["equity"] - le) / le * 100, 2)
-    return acct
 
 async def get_open_positions(session):
     try:
@@ -513,8 +484,12 @@ async def smart_daily_scan(session):
 def calc_vwap(bars):
     cv=ct=0; vals=[]
     for b in bars:
-        tp=(b['h']+b['l']+b['c'])/3; ct+=tp*b['v']; cv+=b['v']
-        vals.append(round(ct/cv if cv>0 else 0,4))
+        # Use Alpaca native VWAP if available (SIP feed), else calculate
+        if b.get('vw'):
+            vals.append(round(b['vw'],4))
+        else:
+            tp=(b['h']+b['l']+b['c'])/3; ct+=tp*b['v']; cv+=b['v']
+            vals.append(round(ct/cv if cv>0 else 0,4))
     return vals
 
 def calc_rsi(closes, p=14):
@@ -792,86 +767,58 @@ async def get_news(session, ticker):
             return ("NEGATIVE" if nc>pc else "POSITIVE" if pc>nc else "NEUTRAL"),headlines
     except: return "NEUTRAL",[]
 
-# ── CONTINUOUS BACKGROUND SCANNER ─────────────────────────
-# Watches the FULL universe in the background and keeps a fresh ranked pool.
-# This gives "watching everything in real time" coverage WITHOUT forcing trades.
-# The trade loop still only acts on high-quality signals from the watchlist.
-opportunity_pool = []   # ranked candidates, refreshed continuously
-
-async def background_scanner():
-    """Continuously rank the whole universe so the watchlist always has
-    the freshest movers available — without overtrading."""
-    global opportunity_pool
-    print("Background universe scanner starting...")
-    await asyncio.sleep(20)  # let startup settle
+async def replace_ticker(removed_ticker):
+    """Immediately find and add a replacement stock when one is removed"""
+    print("Finding replacement for", removed_ticker)
     async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                if market_status() not in ("OPEN", "PRE_MARKET"):
-                    await asyncio.sleep(300); continue
-
-                spy_trend, spy_chg, _ = await get_spy_trend(session)
-                ranked = []
-                for ticker in SCAN_UNIVERSE:
-                    try:
-                        p, chg, vol = await yahoo_price(session, ticker)
-                        if not p or not vol or p < 2 or p > 100: 
-                            await asyncio.sleep(0.15); continue
-                        if abs(chg or 0) < 1.0:
-                            await asyncio.sleep(0.15); continue
-                        bars = await get_bars(session, ticker, "5Min", 20)
-                        if len(bars) < 10:
-                            await asyncio.sleep(0.15); continue
-                        atr = calc_atr(bars); vol_r = calc_vol_ratio(bars)
-                        if not atr or not vol_r: 
-                            await asyncio.sleep(0.15); continue
-                        atr_pct = (atr/p)*100
-                        # Rank: volume surge + volatility + alignment with market
+        try:
+            candidates = []
+            # Scan universe for best replacement
+            for ticker in SCAN_UNIVERSE:
+                if ticker in watchlist or ticker == removed_ticker: continue
+                try:
+                    p,chg,vol = await yahoo_price(session, ticker)
+                    if not p or not vol or p < 1: continue
+                    if abs(chg or 0) < 1: continue
+                    bars = await get_bars(session, ticker, "5Min", 20)
+                    if len(bars) < 10: continue
+                    closes = [b['c'] for b in bars]
+                    rsi = calc_rsi(closes)
+                    vol_r = calc_vol_ratio(bars)
+                    atr = calc_atr(bars)
+                    if not all([rsi, vol_r, atr]): continue
+                    atr_pct = (atr/p)*100
+                    # Good candidate: affordable, good RSI, volume, moving up
+                    if 30 < rsi < 60 and vol_r >= 1.3 and atr_pct >= 1.5 and (chg or 0) > 0 and p < 100:
                         score = 0
-                        if vol_r >= 3: score += 4
-                        elif vol_r >= 2: score += 3
+                        if vol_r >= 2: score += 3
                         elif vol_r >= 1.5: score += 2
                         else: score += 1
-                        if atr_pct >= 5: score += 3
-                        elif atr_pct >= 3: score += 2
-                        elif atr_pct >= 2: score += 1
-                        if (spy_trend=="BULL" and chg>0) or (spy_trend=="BEAR" and chg<0):
-                            score += 2
-                        ranked.append({"ticker":ticker,"price":p,"change":round(chg,2),
-                                       "vol_r":round(vol_r,1),"atr_pct":round(atr_pct,1),
-                                       "score":score})
-                        await asyncio.sleep(0.2)
-                    except: 
-                        await asyncio.sleep(0.15); continue
+                        if atr_pct >= 4: score += 3
+                        elif atr_pct >= 2: score += 2
+                        else: score += 1
+                        if 35 <= rsi <= 55: score += 2  # ideal RSI range
+                        candidates.append({"ticker":ticker,"price":p,"change":chg,
+                                          "rsi":rsi,"vol_r":round(vol_r,1),
+                                          "atr_pct":round(atr_pct,1),"score":score})
+                    await asyncio.sleep(0.3)
+                except: continue
 
-                ranked.sort(key=lambda x: x["score"], reverse=True)
-                opportunity_pool = ranked[:20]   # keep top 20 fresh
-                print("Background scan: pool refreshed, top:",
-                      [c["ticker"] for c in opportunity_pool[:5]])
-                await asyncio.sleep(45)  # refresh pool roughly every 45s
-            except Exception as e:
-                print("Background scanner error:", e)
-                await asyncio.sleep(30)
-
-async def replace_ticker(removed_ticker):
-    """Replace a stale ticker using the freshest pool from the background scanner.
-    Quality-gated: only swaps in a candidate that's genuinely moving."""
-    global watchlist
-    try:
-        for cand in opportunity_pool:
-            t = cand["ticker"]
-            if t not in watchlist and t != removed_ticker and cand["score"] >= 4:
-                watchlist.append(t)
-                print("Replaced "+removed_ticker+" with "+t+" (pool score "+str(cand["score"])+")")
-                return
-        # Pool empty/stale → fall back to defaults
-        for t in DEFAULT_WATCHLIST:
-            if t not in watchlist:
-                watchlist.append(t)
-                print("Re-added "+t+" from defaults after removing "+removed_ticker)
-                return
-    except Exception as e:
-        print("Replace ticker error:", e)
+            if candidates:
+                candidates.sort(key=lambda x: x['score'], reverse=True)
+                best = candidates[0]
+                watchlist.append(best['ticker'])
+                sign = "+" if best['change'] >= 0 else ""
+                print("Replaced "+removed_ticker+" with "+best['ticker']+" silently")
+            else:
+                # Re-add from defaults silently
+                for t in DEFAULT_WATCHLIST:
+                    if t not in watchlist:
+                        watchlist.append(t)
+                        print("Re-added "+t+" from defaults after removing "+removed_ticker)
+                        break
+        except Exception as e:
+            print("Replace ticker error:", e)
 
 async def stocktwits_premarket_scan(session):
     """Scan Stocktwits during pre/after market for trending stocks"""
@@ -1263,12 +1210,6 @@ async def main():
     await asyncio.sleep(10)  # prevent duplicate startup messages
 
     async with aiohttp.ClientSession() as session:
-        # Sync REAL equity from Alpaca before announcing, so numbers are accurate
-        try:
-            await sync_equity_and_pnl(session)
-        except Exception as e:
-            print("Startup equity sync failed:", e)
-
         await tg(session,
             "AlphaSignal SMC AUTO-TRADER Started!\n\n"
             "PAPER TRADING MODE\n"
@@ -1359,11 +1300,6 @@ async def main():
 
             if status=="CLOSED": await asyncio.sleep(300); continue
             if bot_paused: await asyncio.sleep(30); continue
-
-            # Sync REAL equity + REAL daily P&L from Alpaca so the loss limit works
-            try:
-                await sync_equity_and_pnl(session)
-            except Exception as e: print("Equity sync err:",e)
 
             try:
                 if active_trades: await check_trailing(session)
@@ -1549,15 +1485,12 @@ async def main():
 
                 except Exception as e: print("  ERROR",ticker,":",e); continue
 
-            # ── Replace only genuinely dead tickers (reduces churn) ──
-            # Background scanner keeps a fresh pool; we pull from it.
-            # 4 consecutive no-signals (~4 min) before swapping — NOT instant,
-            # because "no signal" is the normal state and churning loses money.
+            # ── Continuous rescan - replace any stock with no signal ──
             if status=="OPEN":
                 for ticker in list(watchlist):
                     count = no_signal_count.get(ticker, 0)
-                    if count >= 4:
-                        print("  No signal on "+ticker+" for "+str(count)+" scans - replacing from pool")
+                    if count >= 2:  # 2 consecutive no-signals = replace
+                        print("  No signal on "+ticker+" for "+str(count)+" scans - replacing")
                         if ticker in watchlist:
                             watchlist.remove(ticker)
                         asyncio.ensure_future(replace_ticker(ticker))
@@ -1566,7 +1499,7 @@ async def main():
             await asyncio.sleep(SCAN_INTERVAL)
 
 async def run_all():
-    await asyncio.gather(main(), alpaca_websocket(), background_scanner())
+    await asyncio.gather(main(), alpaca_websocket())
 
 if __name__=="__main__":
     asyncio.run(run_all())
