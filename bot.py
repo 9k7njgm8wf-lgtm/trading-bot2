@@ -377,6 +377,36 @@ async def get_open_positions(session: aiohttp.ClientSession):
         log_err("get_open_positions", e)
         return {}
 
+# Cache asset shortability so we don't hit the API every signal
+_shortable_cache = {}
+
+async def is_shortable(session: aiohttp.ClientSession, ticker: str):
+    """
+    Check whether Alpaca allows shorting this asset.
+    Returns True/False. Cached per ticker for the session.
+    """
+    if ticker in _shortable_cache:
+        return _shortable_cache[ticker]
+    try:
+        async with session.get(
+            f"{ALPACA_TRADE_BASE}/v2/assets/{ticker}",
+            headers=ALPACA_TRADE_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=8)
+        ) as r:
+            data = await r.json()
+            # Asset must be tradable, shortable, and easy-to-borrow
+            ok = bool(data.get("tradable") and data.get("shortable")
+                      and data.get("easy_to_borrow"))
+            _shortable_cache[ticker] = ok
+            log(f"  {ticker} shortable={ok} "
+                f"(tradable={data.get('tradable')}, shortable={data.get('shortable')}, "
+                f"etb={data.get('easy_to_borrow')})")
+            return ok
+    except Exception as e:
+        log_err(f"is_shortable {ticker}", e)
+        # On error, be safe and disallow shorting
+        return False
+
 async def place_order(session: aiohttp.ClientSession,
                       ticker: str, side: str, qty: int,
                       sl_price: float, tp_price: float):
@@ -1979,6 +2009,13 @@ async def main():
                                         place_ok = False
                                     else:
                                         result["sl"], result["tp"] = fixed_sl, fixed_tp
+
+                                # 3. For SHORT orders, verify the asset is shortable
+                                if place_ok and result["signal"] == "SELL":
+                                    if not await is_shortable(session, ticker):
+                                        log(f"  {ticker}: not shortable — skipping SELL")
+                                        await tg(session, f"⚠️ {ticker} cannot be sold short — signal only, no order")
+                                        place_ok = False
 
                                 if place_ok:
                                     pos = await get_open_positions(session)
