@@ -448,6 +448,54 @@ def calc_position_size(entry: float, sl: float, confidence: str, equity: float):
 
     return shares, round(shares * entry, 2), leverage
 
+def validate_bracket(signal: str, entry: float, sl: float, tp: float):
+    """
+    Ensure SL/TP are on the correct sides of entry with a safe minimum gap.
+    Alpaca rejects bracket orders where, for a SHORT, stop_price <= entry,
+    or for a LONG, stop_price >= entry. Returns (ok, sl, tp, reason).
+    """
+    entry = round(entry, 2)
+    # Minimum gap: at least 1 cent, scaled a bit for higher-priced stocks
+    min_gap = max(0.02, round(entry * 0.002, 2))
+
+    if signal == "BUY":
+        # LONG: SL below entry, TP above entry
+        sl = round(sl, 2)
+        tp = round(tp, 2)
+        if sl >= entry - min_gap:
+            sl = round(entry - min_gap, 2)
+        if tp <= entry + min_gap:
+            tp = round(entry + min_gap, 2)
+        if sl >= entry or tp <= entry:
+            return False, sl, tp, "LONG bracket invalid after correction"
+    else:
+        # SHORT: SL above entry, TP below entry
+        sl = round(sl, 2)
+        tp = round(tp, 2)
+        if sl <= entry + min_gap:
+            sl = round(entry + min_gap, 2)
+        if tp >= entry - min_gap:
+            tp = round(entry - min_gap, 2)
+        if sl <= entry or tp >= entry:
+            return False, sl, tp, "SHORT bracket invalid after correction"
+
+    return True, sl, tp, ""
+
+def can_place_bracket_order():
+    """
+    Alpaca bracket orders are only accepted during regular trading hours
+    (9:30 AM - 3:55 PM NY). Returns (ok, reason).
+    """
+    ny = get_ny()
+    if ny.weekday() >= 5:
+        return False, "weekend"
+    t = ny.hour * 60 + ny.minute
+    if t < 9 * 60 + 30:
+        return False, "pre-market (orders open at 9:30 NY)"
+    if t > 15 * 60 + 55:
+        return False, "after 3:55 PM NY (too close to close)"
+    return True, ""
+
 # ══════════════════════════════════════════════════════════
 #  SMART DAILY SCANNER
 # ══════════════════════════════════════════════════════════
@@ -1912,30 +1960,51 @@ async def main():
                         # Place auto trade
                         if AUTO_TRADE and shares > 0:
                             try:
-                                pos = await get_open_positions(session)
-                                if len(pos) >= MAX_OPEN_TRADES:
-                                    await tg(session, f"⚠️ Max {MAX_OPEN_TRADES} positions — skipping")
-                                elif ticker in pos:
-                                    await tg(session, f"⚠️ Already in {ticker} — skipping")
-                                else:
-                                    side  = "buy" if result["signal"] == "BUY" else "sell"
-                                    order = await place_order(session, ticker, side, shares,
-                                                              result["sl"], result["tp"])
-                                    if order["success"]:
-                                        trade_type = "LONG" if side == "buy" else "SHORT"
-                                        await tg(session,
-                                            f"✅ AUTO-TRADE PLACED [PAPER] - {trade_type}\n\n"
-                                            f"{'📈 BUY' if side=='buy' else '📉 SELL SHORT'} {ticker}\n"
-                                            f"Qty: {shares} shares\n"
-                                            f"Entry: ${result['entry']}\n"
-                                            f"SL: ${result['sl']}\n"
-                                            f"TP: ${result['tp']}\n"
-                                            f"R/R: {result['rr']}\n"
-                                            f"Leverage: 1:{leverage}\n"
-                                            f"Cost: ${cost}\n"
-                                            f"Account: ${equity}")
+                                place_ok = True
+
+                                # 1. Only place bracket orders during regular hours
+                                hours_ok, hours_reason = can_place_bracket_order()
+                                if not hours_ok:
+                                    log(f"  {ticker}: order skipped — {hours_reason}")
+                                    await tg(session, f"⏸ Signal only (no order): {hours_reason}")
+                                    place_ok = False
+
+                                # 2. Validate & correct SL/TP sides + minimum gap
+                                if place_ok:
+                                    valid, fixed_sl, fixed_tp, vreason = validate_bracket(
+                                        result["signal"], result["entry"], result["sl"], result["tp"])
+                                    if not valid:
+                                        log(f"  {ticker}: bracket invalid — {vreason}")
+                                        await tg(session, f"❌ Order skipped: bad SL/TP ({vreason})")
+                                        place_ok = False
                                     else:
-                                        await tg(session, f"❌ Auto-trade FAILED: {str(order.get('error',''))[:100]}")
+                                        result["sl"], result["tp"] = fixed_sl, fixed_tp
+
+                                if place_ok:
+                                    pos = await get_open_positions(session)
+                                    if len(pos) >= MAX_OPEN_TRADES:
+                                        await tg(session, f"⚠️ Max {MAX_OPEN_TRADES} positions — skipping")
+                                    elif ticker in pos:
+                                        await tg(session, f"⚠️ Already in {ticker} — skipping")
+                                    else:
+                                        side  = "buy" if result["signal"] == "BUY" else "sell"
+                                        order = await place_order(session, ticker, side, shares,
+                                                                  result["sl"], result["tp"])
+                                        if order["success"]:
+                                            trade_type = "LONG" if side == "buy" else "SHORT"
+                                            await tg(session,
+                                                f"✅ AUTO-TRADE PLACED [PAPER] - {trade_type}\n\n"
+                                                f"{'📈 BUY' if side=='buy' else '📉 SELL SHORT'} {ticker}\n"
+                                                f"Qty: {shares} shares\n"
+                                                f"Entry: ${result['entry']}\n"
+                                                f"SL: ${result['sl']}\n"
+                                                f"TP: ${result['tp']}\n"
+                                                f"R/R: {result['rr']}\n"
+                                                f"Leverage: 1:{leverage}\n"
+                                                f"Cost: ${cost}\n"
+                                                f"Account: ${equity}")
+                                        else:
+                                            await tg(session, f"❌ Auto-trade FAILED: {str(order.get('error',''))[:120]}")
                             except Exception as e:
                                 log_err("auto-trade", e)
                                 await tg(session, f"Auto-trade error: {str(e)[:100]}")
