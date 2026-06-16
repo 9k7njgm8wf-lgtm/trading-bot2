@@ -1878,6 +1878,20 @@ async def main():
                             log(f"  {ticker}: duplicate signal — skipping")
                             continue
 
+                        # Early exit: skip SELL signals on assets that can't be shorted.
+                        # Done here (before AI/news/Stocktwits) to avoid wasted work and spam.
+                        if result["signal"] == "SELL":
+                            if not ALLOW_SHORT:
+                                continue
+                            if not await is_shortable(session, ticker):
+                                log(f"  {ticker}: not shortable — skipping SELL early")
+                                # Treat as a no-signal so stale-ticker replacement kicks in
+                                no_signal_count[ticker] = no_signal_count.get(ticker, 0) + 1
+                                # Suppress repeat SELL alerts via the normal cooldown
+                                last_signal_time[ticker] = datetime.now(timezone.utc)
+                                last_signal_type[ticker] = "SELL"
+                                continue
+
                         tf_agrees = check_3tf(bars_1m, bars_5m, bars_15m, result["signal"])
                         if REQUIRE_3TF_AGREE and tf_agrees < 2:
                             log(f"  {ticker}: only {tf_agrees}/3 TF agree")
@@ -1886,9 +1900,6 @@ async def main():
                         spy_trend, spy_chg, _ = await get_spy_trend(session)
                         if SPY_FILTER and result["signal"] == "BUY" and spy_trend == "BEAR":
                             log(f"  {ticker}: BUY blocked by SPY filter")
-                            continue
-
-                        if result["signal"] == "SELL" and not ALLOW_SHORT:
                             continue
 
                         rvol     = calc_rvol(bars_1m, bars_yest)
