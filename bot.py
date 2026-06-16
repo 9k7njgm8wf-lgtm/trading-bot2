@@ -1049,12 +1049,13 @@ async def ai_confirm(session: aiohttp.ClientSession,
            f"Sweep={result.get('liq_sweep')} Zone={result.get('zone')} "
            f"PO3={result.get('po3')} SMT={result.get('smt')}")
     score = result.get("buy_score" if result["signal"] == "BUY" else "sell_score", 0)
-    prompt = (f"Trade signal {ticker}: {result['signal']} Score:{score}/20 "
-              f"RSI:{result['rsi']} Vol:{result['vol_ratio']}x {smc} "
-              f"News:{sentiment} 3TF:{tf_agrees}/3 "
-              f"Respond ONLY JSON: "
-              f'{{\"verdict\":\"CONFIRMED\" or \"REJECTED\" or \"CAUTION\","
-              f'\"reason\":\"one sentence\",\"tip\":\"one actionable tip\"}}')
+    json_schema = '{"verdict":"CONFIRMED" or "REJECTED" or "CAUTION","reason":"one sentence","tip":"one actionable tip"}'
+    prompt = (
+        f"Trade signal {ticker}: {result['signal']} Score:{score}/20 "
+        f"RSI:{result['rsi']} Vol:{result['vol_ratio']}x {smc} "
+        f"News:{sentiment} 3TF:{tf_agrees}/3 "
+        f"Respond ONLY JSON: {json_schema}"
+    )
     try:
         async with session.post(
             "https://api.groq.com/openai/v1/chat/completions",
