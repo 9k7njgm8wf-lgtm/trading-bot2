@@ -298,6 +298,35 @@ async def get_bars(session: aiohttp.ClientSession, ticker: str, tf: str = "5Min"
         log(f"get_bars {ticker} {tf}: {e}")
         return []
 
+async def check_sip_access(session: aiohttp.ClientSession):
+    """
+    Test whether the data keys can pull recent SIP data.
+    Free/Basic plan rejects SIP queries for the last 15 minutes with a
+    'subscription does not permit' message. Returns (has_sip, detail).
+    """
+    try:
+        async with session.get(
+            f"{ALPACA_BASE}/stocks/AAPL/trades/latest",
+            headers=ALPACA_LIVE_HEADERS,
+            params={"feed": "sip"},
+            timeout=aiohttp.ClientTimeout(total=8)
+        ) as r:
+            text = await r.text()
+            if r.status == 200:
+                try:
+                    data = json.loads(text)
+                    if data.get("trade", {}).get("p"):
+                        return True, "SIP data OK"
+                except Exception:
+                    pass
+                return True, "SIP responded (no trade yet — market may be closed)"
+            # 403/subscription errors mean no SIP entitlement
+            if "subscription" in text.lower() or r.status in (401, 403):
+                return False, f"No SIP access (HTTP {r.status})"
+            return False, f"Unexpected response (HTTP {r.status})"
+    except Exception as e:
+        return False, f"Check failed: {str(e)[:60]}"
+
 async def get_yahoo_bars(session: aiohttp.ClientSession, ticker: str, days: int = 90):
     try:
         end   = int(time.time())
@@ -1622,6 +1651,16 @@ async def handle_cmds(session: aiohttp.ClientSession, offset: int):
             elif text == "/watchlist":
                 await tg(session, "👀 Watching: " + (", ".join(watchlist) if watchlist else "Empty"))
 
+            elif text == "/data":
+                has_sip, sip_detail = await check_sip_access(session)
+                if has_sip:
+                    await tg(session, f"📡 Data feed: ✅ SIP active\n{sip_detail}")
+                else:
+                    await tg(session,
+                        f"📡 Data feed: ⚠️ SIP NOT active\n{sip_detail}\n\n"
+                        "On free IEX data. Upgrade to Algo Trader Plus ($99/mo) "
+                        "on the account tied to your DATA keys for accurate prices.")
+
             elif text == "/pause":
                 bot_paused = True
                 await tg(session, "⏸ Bot paused.")
@@ -1695,6 +1734,7 @@ async def handle_cmds(session: aiohttp.ClientSession, offset: int):
                     "SCANNING:",
                     "/scan - find today's best stocks",
                     "/watchlist - current watchlist",
+                    "/data - check SIP data feed status",
                     "/backtest [TICKER] - test strategy", "",
                     "CONTROL:",
                     "/status - full bot status",
@@ -1744,6 +1784,22 @@ async def main():
             f"Risk/trade: {RISK_PCT}% = ${round(ACCOUNT_SIZE * RISK_PCT / 100, 2)}\n\n"
             "/help for all commands"
         )
+
+        # Verify SIP data entitlement so the user knows if prices are accurate
+        try:
+            has_sip, sip_detail = await check_sip_access(session)
+            if has_sip:
+                await tg(session, f"📡 Data feed: ✅ SIP active ({sip_detail})\nPrices are full-market accurate.")
+            else:
+                await tg(session,
+                    f"📡 Data feed: ⚠️ SIP NOT active\n{sip_detail}\n\n"
+                    "You're on free IEX data (~2% of market volume). Prices may be "
+                    "thin/inaccurate and the scanner may show 'data unavailable'.\n\n"
+                    "Fix: Alpaca dashboard → Plans & Features → Upgrade to Algo Trader Plus "
+                    "($99/mo) on the account tied to your DATA keys.")
+            log(f"SIP check: has_sip={has_sip} ({sip_detail})")
+        except Exception as e:
+            log_err("SIP check", e)
 
         # If market is already open on startup, scan immediately
         if market_status() == "OPEN":
