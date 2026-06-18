@@ -276,9 +276,13 @@ async def get_realtime_price(session: aiohttp.ClientSession, ticker: str):
     return yp, "YAHOO"
 
 async def get_spy_trend(session: aiohttp.ClientSession):
-    p, c, _ = await yahoo_price(session, "SPY")
+    # Try Finnhub first (reliable from datacenter IPs), fall back to Yahoo
+    p, c, _, _ = await get_finnhub_price(session, "SPY")
+    if p is None:
+        p, c, _ = await yahoo_price(session, "SPY")
     if p is None:
         return "NEUTRAL", 0, 0
+    c = c or 0
     return ("BULL" if c >= 0 else "BEAR"), c, p
 
 async def get_bars(session: aiohttp.ClientSession, ticker: str, tf: str = "5Min", limit: int = 50):
@@ -556,12 +560,19 @@ async def smart_daily_scan(session: aiohttp.ClientSession):
 
     for ticker in SCAN_UNIVERSE:
         try:
-            p, chg, vol = await yahoo_price(session, ticker)
-            if not p or not vol or p < 1:
+            # Price & % change from Finnhub (reliable from datacenter IPs).
+            # Volume/ATR/RVOL come from Alpaca daily bars below.
+            p, chg, fh_high, fh_low = await get_finnhub_price(session, ticker)
+            if not p or p < 1:
                 continue
 
             bars = await get_bars(session, ticker, "1Day", 15)
             if len(bars) < 5:
+                continue
+
+            # Today's volume = most recent daily bar's volume
+            vol = bars[-1]["v"]
+            if not vol:
                 continue
 
             avg_vol = sum(b["v"] for b in bars[:-1]) / len(bars[:-1])
@@ -574,6 +585,8 @@ async def smart_daily_scan(session: aiohttp.ClientSession):
             # Hard exclusions only: bad price range (can't size / too illiquid)
             if p < 2 or p > 100:
                 continue
+
+            chg = chg or 0  # Finnhub may return None if prev close was 0
 
             score = 0
             if rvol >= 5:        score += 5
@@ -611,7 +624,7 @@ async def smart_daily_scan(session: aiohttp.ClientSession):
                 "spy_aligned": (spy_trend == "BULL" and chg > 0) or (spy_trend == "BEAR" and chg < 0),
             })
 
-            await asyncio.sleep(0.4)  # gentler on Yahoo to avoid 429 rate-limiting
+            await asyncio.sleep(1.1)  # ~55 calls/min, under Finnhub's 60/min free-tier limit
         except Exception as e:
             log(f"scan {ticker}: {e}")
             continue
@@ -1993,13 +2006,15 @@ async def main():
                         result["rr"] = "1:" + str(round(reward / risk, 1)) if risk > 0 else "N/A"
                         log(f"  Live entry: ${yp} [{price_source}]  SL:${result['sl']}  TP:${result['tp']}")
 
-                        # Finnhub accuracy confirmation
+                        # Finnhub accuracy confirmation — always sync entry+SL+TP
+                        # to ONE consistent price so the bracket can't desync.
                         fh_price, _, _, _ = await get_finnhub_price(session, ticker)
                         if fh_price:
                             dev = abs(fh_price - result["entry"]) / result["entry"] * 100
                             log(f"  Finnhub confirm: ${fh_price} dev:{round(dev,1)}%")
-                            if dev > 1.5:
-                                result["entry"] = fh_price
+                            # Use Finnhub as the single source of truth for entry,
+                            # then derive SL/TP from that same number.
+                            result["entry"] = fh_price
                             if result["atr"]:
                                 if result["signal"] == "BUY":
                                     result["sl"] = round(fh_price - result["atr"] * 1.5, 4)
@@ -2007,6 +2022,9 @@ async def main():
                                 else:
                                     result["sl"] = round(fh_price + result["atr"] * 1.5, 4)
                                     result["tp"] = round(fh_price - result["atr"] * 3.0, 4)
+                            # If price moved a lot since the signal, log it loudly
+                            if dev > 1.5:
+                                log(f"  {ticker}: price moved {round(dev,1)}% since signal — re-anchored to ${fh_price}")
 
                         acct = await get_account_info(session)
                         equity = acct["equity"] if acct else ACCOUNT_SIZE
@@ -2031,8 +2049,22 @@ async def main():
                                     await tg(session, f"⏸ Signal only (no order): {hours_reason}")
                                     place_ok = False
 
-                                # 2. Validate & correct SL/TP sides + minimum gap
+                                # 2. Re-anchor to the freshest price right before
+                                #    placing, then validate. This prevents Alpaca
+                                #    rejecting the bracket because price moved since
+                                #    the signal was computed.
                                 if place_ok:
+                                    fresh_price, _ = await get_realtime_price(session, ticker)
+                                    if fresh_price and fresh_price > 0:
+                                        result["entry"] = round(fresh_price, 2)
+                                        if result["atr"]:
+                                            if result["signal"] == "BUY":
+                                                result["sl"] = round(fresh_price - result["atr"] * 1.5, 4)
+                                                result["tp"] = round(fresh_price + result["atr"] * 3.0, 4)
+                                            else:
+                                                result["sl"] = round(fresh_price + result["atr"] * 1.5, 4)
+                                                result["tp"] = round(fresh_price - result["atr"] * 3.0, 4)
+
                                     valid, fixed_sl, fixed_tp, vreason = validate_bracket(
                                         result["signal"], result["entry"], result["sl"], result["tp"])
                                     if not valid:
