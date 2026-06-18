@@ -301,31 +301,39 @@ async def get_bars(session: aiohttp.ClientSession, ticker: str, tf: str = "5Min"
 async def check_sip_access(session: aiohttp.ClientSession):
     """
     Test whether the data keys can pull recent SIP data.
-    Free/Basic plan rejects SIP queries for the last 15 minutes with a
-    'subscription does not permit' message. Returns (has_sip, detail).
+    - 200 with a trade  -> SIP active
+    - 401/403 or 'subscription' message -> no SIP entitlement
+    - 429 (rate limited) -> UNKNOWN, retry; never report as 'no SIP'
+    Returns (status, detail) where status is 'yes', 'no', or 'unknown'.
     """
-    try:
-        async with session.get(
-            f"{ALPACA_BASE}/stocks/AAPL/trades/latest",
-            headers=ALPACA_LIVE_HEADERS,
-            params={"feed": "sip"},
-            timeout=aiohttp.ClientTimeout(total=8)
-        ) as r:
-            text = await r.text()
-            if r.status == 200:
-                try:
-                    data = json.loads(text)
-                    if data.get("trade", {}).get("p"):
-                        return True, "SIP data OK"
-                except Exception:
-                    pass
-                return True, "SIP responded (no trade yet — market may be closed)"
-            # 403/subscription errors mean no SIP entitlement
-            if "subscription" in text.lower() or r.status in (401, 403):
-                return False, f"No SIP access (HTTP {r.status})"
-            return False, f"Unexpected response (HTTP {r.status})"
-    except Exception as e:
-        return False, f"Check failed: {str(e)[:60]}"
+    for attempt in range(3):
+        try:
+            async with session.get(
+                f"{ALPACA_BASE}/stocks/AAPL/trades/latest",
+                headers=ALPACA_LIVE_HEADERS,
+                params={"feed": "sip"},
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                text = await r.text()
+                if r.status == 200:
+                    try:
+                        data = json.loads(text)
+                        if data.get("trade", {}).get("p"):
+                            return "yes", "SIP data OK"
+                    except Exception:
+                        pass
+                    return "yes", "SIP responded (no trade yet — market may be closed)"
+                if r.status in (401, 403) or "subscription" in text.lower():
+                    return "no", f"No SIP entitlement (HTTP {r.status})"
+                if r.status == 429:
+                    # Rate limited — wait and retry, this says nothing about SIP
+                    await asyncio.sleep(3 * (attempt + 1))
+                    continue
+                return "unknown", f"Unexpected response (HTTP {r.status})"
+        except Exception as e:
+            await asyncio.sleep(2)
+            last_err = str(e)[:60]
+    return "unknown", "Rate limited (HTTP 429) — could not confirm. Try /data later."
 
 async def get_yahoo_bars(session: aiohttp.ClientSession, ticker: str, days: int = 90):
     try:
@@ -1652,14 +1660,16 @@ async def handle_cmds(session: aiohttp.ClientSession, offset: int):
                 await tg(session, "👀 Watching: " + (", ".join(watchlist) if watchlist else "Empty"))
 
             elif text == "/data":
-                has_sip, sip_detail = await check_sip_access(session)
-                if has_sip:
+                sip_status, sip_detail = await check_sip_access(session)
+                if sip_status == "yes":
                     await tg(session, f"📡 Data feed: ✅ SIP active\n{sip_detail}")
-                else:
+                elif sip_status == "no":
                     await tg(session,
                         f"📡 Data feed: ⚠️ SIP NOT active\n{sip_detail}\n\n"
                         "On free IEX data. Upgrade to Algo Trader Plus ($99/mo) "
                         "on the account tied to your DATA keys for accurate prices.")
+                else:
+                    await tg(session, f"📡 Data feed: ❓ Could not confirm\n{sip_detail}")
 
             elif text == "/pause":
                 bot_paused = True
@@ -1785,19 +1795,26 @@ async def main():
             "/help for all commands"
         )
 
-        # Verify SIP data entitlement so the user knows if prices are accurate
+        # Verify SIP data entitlement so the user knows if prices are accurate.
+        # Brief pause first so we don't collide with the price poller's burst
+        # and trip Alpaca's rate limit (which would give a misleading 429).
+        await asyncio.sleep(8)
         try:
-            has_sip, sip_detail = await check_sip_access(session)
-            if has_sip:
+            sip_status, sip_detail = await check_sip_access(session)
+            if sip_status == "yes":
                 await tg(session, f"📡 Data feed: ✅ SIP active ({sip_detail})\nPrices are full-market accurate.")
-            else:
+            elif sip_status == "no":
                 await tg(session,
                     f"📡 Data feed: ⚠️ SIP NOT active\n{sip_detail}\n\n"
                     "You're on free IEX data (~2% of market volume). Prices may be "
                     "thin/inaccurate and the scanner may show 'data unavailable'.\n\n"
                     "Fix: Alpaca dashboard → Plans & Features → Upgrade to Algo Trader Plus "
                     "($99/mo) on the account tied to your DATA keys.")
-            log(f"SIP check: has_sip={has_sip} ({sip_detail})")
+            else:  # unknown
+                await tg(session,
+                    f"📡 Data feed: ❓ Could not confirm SIP\n{sip_detail}\n"
+                    "Send /data in a minute to re-check.")
+            log(f"SIP check: {sip_status} ({sip_detail})")
         except Exception as e:
             log_err("SIP check", e)
 
