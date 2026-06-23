@@ -2334,18 +2334,35 @@ async def close_crypto_position(session: aiohttp.ClientSession, symbol: str):
         log_err(f"close_crypto_position {symbol}", e)
         return None
 
-def calc_crypto_size(entry: float, sl: float, equity: float):
-    """Risk-based fractional sizing for crypto (long-only, no leverage)."""
-    risk_amt = equity * (CRYPTO_RISK_PCT / 100)
+def calc_crypto_size(entry: float, sl: float, equity: float, cash: float):
+    """
+    Risk-based fractional sizing for crypto (long-only, no leverage).
+    CRITICAL: crypto cannot be bought on margin — it must be sized against
+    real USD cash, not buying power/equity. We cap by the smaller of:
+      - risk-based size (CRYPTO_RISK_PCT of equity)
+      - 20% of equity
+      - 90% of available cash (leave a buffer for fees/slippage)
+    """
     rps = abs(entry - sl)
-    if rps <= 0:
+    if rps <= 0 or cash <= 0:
         return 0.0
+
+    risk_amt = equity * (CRYPTO_RISK_PCT / 100)
     qty = risk_amt / rps
-    # Cap any single crypto position at 20% of equity
-    max_cost = equity * 0.20
+
+    # Cap by 20% of equity
+    max_cost_equity = equity * 0.20
+    # Cap by available cash (crypto needs real USD), 90% to leave a buffer
+    max_cost_cash = cash * 0.90
+    max_cost = min(max_cost_equity, max_cost_cash)
+
     if qty * entry > max_cost:
         qty = max_cost / entry
-    # Round to 6 decimals (Alpaca accepts fractional crypto)
+
+    # If we can't afford even a tiny position, return 0
+    if qty * entry < 1:
+        return 0.0
+
     return round(qty, 6)
 
 async def monitor_crypto_positions(session: aiohttp.ClientSession):
@@ -2467,6 +2484,12 @@ async def crypto_loop():
                             log(f"  CRYPTO {symbol}: RSI overbought {result['rsi']}")
                             continue
 
+                        # Don't buy into a PREMIUM zone with elevated RSI
+                        # (that's buying the high, not a discount entry)
+                        if result.get("zone") == "PREMIUM" and (result.get("rsi") or 0) > 55:
+                            log(f"  CRYPTO {symbol}: PREMIUM zone + RSI {result.get('rsi')} — skip (buying high)")
+                            continue
+
                         # Fresh price + SL/TP from ATR
                         price = await get_crypto_price(session, symbol)
                         if not price:
@@ -2478,8 +2501,10 @@ async def crypto_loop():
 
                         acct = await get_account_info(session)
                         equity = acct["equity"] if acct else ACCOUNT_SIZE
-                        qty = calc_crypto_size(entry, sl, equity)
+                        cash   = acct["cash"]   if acct else ACCOUNT_SIZE
+                        qty = calc_crypto_size(entry, sl, equity, cash)
                         if qty <= 0:
+                            log(f"  CRYPTO {symbol}: can't afford position (cash ${cash})")
                             continue
 
                         rr = round(abs(tp - entry) / abs(entry - sl), 1) if entry != sl else 0
