@@ -39,6 +39,13 @@ ALLOW_SHORT        = True
 CLOSE_ALL_TIME     = (15, 45)
 LEVERAGE_MAP       = {"HIGH": 2, "MEDIUM": 1}
 
+# ── PYRAMIDING (adding to winning positions) ──────────────
+PYRAMID_ENABLED      = True
+PYRAMID_MIN_SCORE    = 10     # new signal must be strong (vs MIN_SCORE 8 for fresh entry)
+PYRAMID_MAX_ADDS     = 3      # max times to add to one symbol (hard safety cap)
+PYRAMID_MIN_PROFIT   = 0.5    # position must be at least +0.5% in profit to add
+pyramid_adds         = {}     # ticker -> number of adds so far
+
 # ── CRYPTO CONFIG ─────────────────────────────────────────
 CRYPTO_ENABLED      = True
 CRYPTO_UNIVERSE     = ["BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD",
@@ -2186,15 +2193,54 @@ async def main():
 
                                 if place_ok:
                                     pos = await get_open_positions(session)
-                                    if len(pos) >= MAX_OPEN_TRADES:
+                                    if len(pos) >= MAX_OPEN_TRADES and ticker not in pos:
                                         await tg(session, f"⚠️ Max {MAX_OPEN_TRADES} positions — skipping")
                                     elif ticker in pos:
-                                        await tg(session, f"⚠️ Already in {ticker} — skipping")
+                                        # ── PYRAMID: add to a WINNING position on a STRONG same-direction signal ──
+                                        existing = pos[ticker]
+                                        held_side = existing.get("side", "").lower()  # 'long' or 'short'
+                                        want_side = "long" if result["signal"] == "BUY" else "short"
+                                        pnl_pct   = round(float(existing.get("unrealized_plpc", 0)) * 100, 2)
+                                        adds_done = pyramid_adds.get(ticker, 0)
+                                        sig_score = result["buy_score"] if result["signal"] == "BUY" else result["sell_score"]
+
+                                        reason = None
+                                        if not PYRAMID_ENABLED:
+                                            reason = "pyramiding disabled"
+                                        elif held_side != want_side:
+                                            reason = f"signal opposes open {held_side} position"
+                                        elif pnl_pct < PYRAMID_MIN_PROFIT:
+                                            reason = f"position only {pnl_pct}% (need +{PYRAMID_MIN_PROFIT}%)"
+                                        elif sig_score < PYRAMID_MIN_SCORE:
+                                            reason = f"signal too weak ({sig_score}<{PYRAMID_MIN_SCORE})"
+                                        elif adds_done >= PYRAMID_MAX_ADDS:
+                                            reason = f"max {PYRAMID_MAX_ADDS} adds reached"
+
+                                        if reason:
+                                            await tg(session, f"⏸ {ticker}: not adding — {reason}")
+                                        else:
+                                            # Add another tranche, same risk sizing
+                                            side = "buy" if result["signal"] == "BUY" else "sell"
+                                            order = await place_order(session, ticker, side, shares,
+                                                                      result["sl"], result["tp"])
+                                            if order["success"]:
+                                                pyramid_adds[ticker] = adds_done + 1
+                                                await tg(session,
+                                                    f"➕ ADDED TO WINNER [PAPER] - {ticker}\n\n"
+                                                    f"Add #{pyramid_adds[ticker]}/{PYRAMID_MAX_ADDS} "
+                                                    f"(position +{pnl_pct}%)\n"
+                                                    f"{'📈 BUY' if side=='buy' else '📉 SELL SHORT'} {shares} shares\n"
+                                                    f"Entry: ${result['entry']}\n"
+                                                    f"SL: ${result['sl']}  TP: ${result['tp']}\n"
+                                                    f"Signal score: {sig_score}/20")
+                                            else:
+                                                await tg(session, f"❌ Add failed: {str(order.get('error',''))[:120]}")
                                     else:
                                         side  = "buy" if result["signal"] == "BUY" else "sell"
                                         order = await place_order(session, ticker, side, shares,
                                                                   result["sl"], result["tp"])
                                         if order["success"]:
+                                            pyramid_adds[ticker] = 0  # reset add counter for fresh position
                                             trade_type = "LONG" if side == "buy" else "SHORT"
                                             await tg(session,
                                                 f"✅ AUTO-TRADE PLACED [PAPER] - {trade_type}\n\n"
