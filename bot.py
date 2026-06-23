@@ -39,6 +39,18 @@ ALLOW_SHORT        = True
 CLOSE_ALL_TIME     = (15, 45)
 LEVERAGE_MAP       = {"HIGH": 2, "MEDIUM": 1}
 
+# ── CRYPTO CONFIG ─────────────────────────────────────────
+CRYPTO_ENABLED      = True
+CRYPTO_UNIVERSE     = ["BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD",
+                       "AVAX/USD", "LINK/USD", "DOT/USD", "AAVE/USD"]
+CRYPTO_MIN_SCORE    = 9          # slightly stricter than stocks (no SL safety net from broker)
+CRYPTO_RISK_PCT     = 1.0        # risk less per crypto trade (more volatile)
+CRYPTO_MAX_OPEN     = 4          # max simultaneous crypto positions
+CRYPTO_SCAN_INTERVAL = 60        # seconds between crypto scans (24/7)
+CRYPTO_SL_ATR       = 1.5        # stop-loss = entry - ATR*1.5
+CRYPTO_TP_ATR       = 3.0        # take-profit = entry + ATR*3.0
+CRYPTO_DATA_BASE    = "https://data.alpaca.markets/v1beta3/crypto/us"
+
 # ── ENDPOINTS ─────────────────────────────────────────────
 ALPACA_BASE          = "https://data.alpaca.markets/v2"
 ALPACA_TRADE_BASE    = "https://paper-api.alpaca.markets"
@@ -1659,6 +1671,23 @@ async def handle_cmds(session: aiohttp.ClientSession, offset: int):
             elif text == "/watchlist":
                 await tg(session, "👀 Watching: " + (", ".join(watchlist) if watchlist else "Empty"))
 
+            elif text == "/crypto":
+                if not CRYPTO_ENABLED:
+                    await tg(session, "Crypto module is disabled.")
+                else:
+                    lines = ["₿ Crypto Status", "",
+                             f"Trades today: {crypto_trades_today}",
+                             f"Daily P&L: {round(crypto_daily_pnl, 2)}%",
+                             f"Open positions: {len(crypto_active_trades)}/{CRYPTO_MAX_OPEN}", ""]
+                    if crypto_active_trades:
+                        for sym, t in crypto_active_trades.items():
+                            lines.append(f"{sym}: {t['qty']} @ ${t['entry']}  SL:${t['sl']} TP:${t['tp']}")
+                    else:
+                        lines.append("No open crypto positions")
+                    lines.append("")
+                    lines.append("Watching: " + ", ".join(CRYPTO_UNIVERSE))
+                    await tg(session, "\n".join(lines))
+
             elif text == "/data":
                 sip_status, sip_detail = await check_sip_access(session)
                 if sip_status == "yes":
@@ -1745,6 +1774,7 @@ async def handle_cmds(session: aiohttp.ClientSession, offset: int):
                     "/scan - find today's best stocks",
                     "/watchlist - current watchlist",
                     "/data - check SIP data feed status",
+                    "/crypto - crypto module status",
                     "/backtest [TICKER] - test strategy", "",
                     "CONTROL:",
                     "/status - full bot status",
@@ -2217,10 +2247,281 @@ async def main():
                 await asyncio.sleep(15)
 
 # ══════════════════════════════════════════════════════════
+#  CRYPTO MODULE  (separate loop, 24/7, bot-managed SL/TP)
+# ══════════════════════════════════════════════════════════
+# Crypto state
+crypto_active_trades   = {}   # symbol -> {entry, sl, tp, qty, atr, time}
+crypto_last_signal     = {}   # symbol -> datetime of last signal
+crypto_trades_today    = 0
+crypto_daily_pnl       = 0.0
+
+def _crypto_enc(symbol: str) -> str:
+    """URL-encode the slash in crypto symbols, e.g. BTC/USD -> BTC%2FUSD."""
+    return symbol.replace("/", "%2F")
+
+async def get_crypto_bars(session: aiohttp.ClientSession, symbol: str,
+                          tf: str = "5Min", limit: int = 50):
+    """Fetch crypto bars. Crypto data is FREE on Alpaca (no SIP needed)."""
+    try:
+        async with session.get(
+            f"{CRYPTO_DATA_BASE}/bars",
+            headers=ALPACA_LIVE_HEADERS,
+            params={"symbols": symbol, "timeframe": tf, "limit": limit},
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            data = await r.json()
+            bars = (data.get("bars") or {}).get(symbol, [])
+            # Normalise to the same key shape the stock engine expects
+            out = []
+            for b in bars:
+                out.append({"o": round(b["o"], 6), "h": round(b["h"], 6),
+                            "l": round(b["l"], 6), "c": round(b["c"], 6),
+                            "v": b.get("v", 0), "vw": b.get("vw")})
+            return out
+    except Exception as e:
+        log(f"get_crypto_bars {symbol}: {e}")
+        return []
+
+async def get_crypto_price(session: aiohttp.ClientSession, symbol: str):
+    """Latest crypto trade price (free feed)."""
+    try:
+        async with session.get(
+            f"{CRYPTO_DATA_BASE}/latest/trades",
+            headers=ALPACA_LIVE_HEADERS,
+            params={"symbols": symbol},
+            timeout=aiohttp.ClientTimeout(total=6)
+        ) as r:
+            data = await r.json()
+            t = (data.get("trades") or {}).get(symbol, {})
+            p = t.get("p")
+            return round(p, 6) if p else None
+    except Exception as e:
+        log(f"get_crypto_price {symbol}: {e}")
+        return None
+
+async def place_crypto_order(session: aiohttp.ClientSession,
+                             symbol: str, qty: float):
+    """
+    Place a simple market BUY for crypto (long-only, no brackets).
+    SL/TP are managed by monitor_crypto_positions().
+    """
+    try:
+        order = {"symbol": symbol, "qty": str(qty), "side": "buy",
+                 "type": "market", "time_in_force": "gtc"}
+        async with session.post(
+            f"{ALPACA_TRADE_BASE}/v2/orders",
+            headers=ALPACA_TRADE_HEADERS, json=order,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            data = await r.json()
+            if data.get("id"):
+                return {"success": True, "order_id": data["id"]}
+            return {"success": False, "error": str(data)}
+    except Exception as e:
+        log_err("place_crypto_order", e)
+        return {"success": False, "error": str(e)}
+
+async def close_crypto_position(session: aiohttp.ClientSession, symbol: str):
+    """Close a crypto position by selling. Symbol slash must be encoded."""
+    try:
+        async with session.delete(
+            f"{ALPACA_TRADE_BASE}/v2/positions/{_crypto_enc(symbol)}",
+            headers=ALPACA_TRADE_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=8)
+        ) as r:
+            return await r.json()
+    except Exception as e:
+        log_err(f"close_crypto_position {symbol}", e)
+        return None
+
+def calc_crypto_size(entry: float, sl: float, equity: float):
+    """Risk-based fractional sizing for crypto (long-only, no leverage)."""
+    risk_amt = equity * (CRYPTO_RISK_PCT / 100)
+    rps = abs(entry - sl)
+    if rps <= 0:
+        return 0.0
+    qty = risk_amt / rps
+    # Cap any single crypto position at 20% of equity
+    max_cost = equity * 0.20
+    if qty * entry > max_cost:
+        qty = max_cost / entry
+    # Round to 6 decimals (Alpaca accepts fractional crypto)
+    return round(qty, 6)
+
+async def monitor_crypto_positions(session: aiohttp.ClientSession):
+    """
+    Bot-managed SL/TP for crypto, since Alpaca holds no bracket.
+    Also trails the stop upward as price rises.
+    """
+    global crypto_daily_pnl
+    for symbol in list(crypto_active_trades.keys()):
+        try:
+            trade = crypto_active_trades[symbol]
+            price = await get_crypto_price(session, symbol)
+            if not price:
+                continue
+            entry = trade["entry"]
+            atr   = trade.get("atr", abs(entry - trade["sl"]))
+
+            # Trail the stop up (long-only)
+            new_sl = round(price - atr * CRYPTO_SL_ATR, 6)
+            if new_sl > trade["sl"]:
+                trade["sl"] = new_sl
+                log(f"  CRYPTO trail {symbol}: SL -> ${new_sl}")
+
+            hit_sl = price <= trade["sl"]
+            hit_tp = price >= trade["tp"]
+            if hit_sl or hit_tp:
+                await close_crypto_position(session, symbol)
+                pnl = round((price - entry) / entry * 100, 2)
+                crypto_daily_pnl += pnl
+                sign = "+" if pnl >= 0 else ""
+                reason = "TP hit ✅" if hit_tp else "SL hit ❌"
+                await tg(session,
+                    f"{'✅ PROFIT' if pnl > 0 else '❌ LOSS'} - {symbol} (crypto)\n"
+                    f"{reason}\nExit: ${price}\nP&L: {sign}{pnl}%")
+                all_time_log.append({"ticker": symbol, "signal": "BUY",
+                                     "entry": entry, "exit": price, "pnl": pnl,
+                                     "date": get_ny().strftime("%Y-%m-%d")})
+                del crypto_active_trades[symbol]
+        except Exception as e:
+            log_err(f"monitor_crypto {symbol}", e)
+
+def crypto_is_duplicate(symbol: str) -> bool:
+    last = crypto_last_signal.get(symbol)
+    if not last:
+        return False
+    return (datetime.now(timezone.utc) - last).total_seconds() < SIGNAL_COOLDOWN
+
+async def crypto_loop():
+    """
+    Independent 24/7 crypto trading loop. Long-only, bot-managed SL/TP.
+    Reuses the same SMC signal engine as stocks.
+    """
+    global crypto_trades_today
+    if not CRYPTO_ENABLED:
+        return
+
+    log("Crypto loop starting (24/7)...")
+    await asyncio.sleep(20)  # let stock startup settle first
+
+    async with aiohttp.ClientSession() as session:
+        await tg(session,
+            "₿ Crypto module ONLINE (paper)\n"
+            f"Watching: {', '.join(CRYPTO_UNIVERSE)}\n"
+            f"Risk/trade: {CRYPTO_RISK_PCT}% | Max open: {CRYPTO_MAX_OPEN}\n"
+            "Long-only, 24/7, bot-managed SL/TP")
+
+        while True:
+            loop_start = time.monotonic()
+            try:
+                if bot_paused:
+                    await asyncio.sleep(30)
+                    continue
+
+                # Manage existing positions first
+                if crypto_active_trades:
+                    await monitor_crypto_positions(session)
+
+                # Daily reset at NY midnight
+                ny = get_ny()
+                if ny.hour == 0 and ny.minute == 0:
+                    crypto_trades_today = 0
+
+                for symbol in CRYPTO_UNIVERSE:
+                    try:
+                        if symbol in crypto_active_trades:
+                            continue
+                        if len(crypto_active_trades) >= CRYPTO_MAX_OPEN:
+                            break
+                        if crypto_is_duplicate(symbol):
+                            continue
+
+                        bars_1m, bars_5m, bars_15m = await asyncio.gather(
+                            get_crypto_bars(session, symbol, "1Min",  30),
+                            get_crypto_bars(session, symbol, "5Min",  50),
+                            get_crypto_bars(session, symbol, "15Min", 50),
+                        )
+                        if len(bars_5m) < 20:
+                            continue
+
+                        result = compute_signal(bars_1m, bars_5m, bars_15m)
+                        if result is None:
+                            continue
+
+                        # Crypto is long-only on Alpaca — ignore SELL signals
+                        if result["signal"] != "BUY":
+                            continue
+
+                        score = result["buy_score"]
+                        if score < CRYPTO_MIN_SCORE:
+                            continue
+
+                        # Require multi-timeframe agreement like stocks
+                        tf_agrees = check_3tf(bars_1m, bars_5m, bars_15m, "BUY")
+                        if tf_agrees < 2:
+                            continue
+
+                        # RSI overbought guard
+                        if result.get("rsi") and result["rsi"] > 72:
+                            log(f"  CRYPTO {symbol}: RSI overbought {result['rsi']}")
+                            continue
+
+                        # Fresh price + SL/TP from ATR
+                        price = await get_crypto_price(session, symbol)
+                        if not price:
+                            continue
+                        atr = result.get("atr") or (price * 0.01)
+                        entry = round(price, 6)
+                        sl = round(entry - atr * CRYPTO_SL_ATR, 6)
+                        tp = round(entry + atr * CRYPTO_TP_ATR, 6)
+
+                        acct = await get_account_info(session)
+                        equity = acct["equity"] if acct else ACCOUNT_SIZE
+                        qty = calc_crypto_size(entry, sl, equity)
+                        if qty <= 0:
+                            continue
+
+                        rr = round(abs(tp - entry) / abs(entry - sl), 1) if entry != sl else 0
+                        await tg(session,
+                            f"₿ CRYPTO BUY - {symbol}\n\n"
+                            f"Score: {score}/20  3TF: {tf_agrees}/3\n"
+                            f"RSI: {result['rsi']}  Zone: {result.get('zone')}\n\n"
+                            f"Entry: ${entry}\nSL: ${sl}\nTP: ${tp}\nR/R: 1:{rr}\n"
+                            f"Qty: {qty}  (~${round(qty*entry,2)})")
+
+                        order = await place_crypto_order(session, symbol, qty)
+                        if order["success"]:
+                            crypto_active_trades[symbol] = {
+                                "entry": entry, "sl": sl, "tp": tp,
+                                "qty": qty, "atr": atr,
+                                "time": get_ny().strftime("%H:%M")}
+                            crypto_last_signal[symbol] = datetime.now(timezone.utc)
+                            crypto_trades_today += 1
+                            await tg(session,
+                                f"✅ CRYPTO ORDER PLACED [PAPER]\n"
+                                f"{symbol} {qty} @ ${entry}\n"
+                                f"Bot will manage SL ${sl} / TP ${tp}")
+                        else:
+                            await tg(session, f"❌ Crypto order failed: {str(order.get('error',''))[:120]}")
+
+                        await asyncio.sleep(2)
+                    except Exception as e:
+                        log_err(f"crypto signal {symbol}", e)
+                        continue
+
+                elapsed = time.monotonic() - loop_start
+                await asyncio.sleep(max(5.0, CRYPTO_SCAN_INTERVAL - elapsed))
+
+            except Exception as e:
+                log_err("crypto_loop", e)
+                await asyncio.sleep(20)
+
+# ══════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ══════════════════════════════════════════════════════════
 async def run_all():
-    await asyncio.gather(main(), alpaca_price_poller())
+    await asyncio.gather(main(), alpaca_price_poller(), crypto_loop())
 
 if __name__ == "__main__":
     asyncio.run(run_all())
