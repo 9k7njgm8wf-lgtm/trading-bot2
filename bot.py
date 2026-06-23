@@ -2300,6 +2300,13 @@ crypto_active_trades   = {}   # symbol -> {entry, sl, tp, qty, atr, time}
 crypto_last_signal     = {}   # symbol -> datetime of last signal
 crypto_trades_today    = 0
 crypto_daily_pnl       = 0.0
+_crypto_last_log       = {}   # symbol -> last skip reason (to avoid log spam)
+
+def clog(symbol: str, reason: str):
+    """Log a crypto skip only when the reason changes — avoids per-minute spam."""
+    if _crypto_last_log.get(symbol) != reason:
+        _crypto_last_log[symbol] = reason
+        log(f"  CRYPTO {symbol}: {reason}")
 
 def _crypto_enc(symbol: str) -> str:
     """URL-encode the slash in crypto symbols, e.g. BTC/USD -> BTC%2FUSD."""
@@ -2510,30 +2517,34 @@ async def crypto_loop():
 
                         result = compute_signal(bars_1m, bars_5m, bars_15m)
                         if result is None:
+                            clog(symbol, "no signal")
                             continue
 
                         # Crypto is long-only on Alpaca — ignore SELL signals
                         if result["signal"] != "BUY":
+                            clog(symbol, "SELL signal (long-only, skip)")
                             continue
 
                         score = result["buy_score"]
                         if score < CRYPTO_MIN_SCORE:
+                            clog(symbol, f"score {score}<{CRYPTO_MIN_SCORE}")
                             continue
 
                         # Require multi-timeframe agreement like stocks
                         tf_agrees = check_3tf(bars_1m, bars_5m, bars_15m, "BUY")
                         if tf_agrees < 2:
+                            clog(symbol, f"only {tf_agrees}/3 TF agree")
                             continue
 
                         # RSI overbought guard
                         if result.get("rsi") and result["rsi"] > 72:
-                            log(f"  CRYPTO {symbol}: RSI overbought {result['rsi']}")
+                            clog(symbol, f"RSI overbought {result['rsi']}")
                             continue
 
                         # Don't buy into a PREMIUM zone with elevated RSI
                         # (that's buying the high, not a discount entry)
                         if result.get("zone") == "PREMIUM" and (result.get("rsi") or 0) > 55:
-                            log(f"  CRYPTO {symbol}: PREMIUM zone + RSI {result.get('rsi')} — skip (buying high)")
+                            clog(symbol, f"PREMIUM zone + RSI {result.get('rsi')} — skip (buying high)")
                             continue
 
                         # Fresh price + SL/TP from ATR
