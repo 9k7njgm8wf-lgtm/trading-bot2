@@ -48,15 +48,15 @@ pyramid_adds         = {}     # ticker -> number of adds so far
 
 # ── CRYPTO CONFIG ─────────────────────────────────────────
 CRYPTO_ENABLED      = True
-# All Alpaca USD-tradable coins (as of 2026). Note: the smaller/meme coins
-# (BONK, WIF, SHIB, DOGE) are thinner and far more volatile — SMC signals are
-# less reliable on them. You can trim this list back to majors anytime.
+# Alpaca USD-tradable coins. Removed sub-penny coins (BONK, SHIB, WIF) — their
+# tiny prices ($0.00001) break the indicator math (round-to-4-decimals collapses
+# them to zero) and they trade too erratically for SMC signals anyway.
 CRYPTO_UNIVERSE     = [
     "BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD", "AVAX/USD", "LINK/USD",
     "DOT/USD", "AAVE/USD", "BCH/USD", "UNI/USD", "MKR/USD", "YFI/USD",
     "CRV/USD", "GRT/USD", "SUSHI/USD", "BAT/USD", "XTZ/USD", "DOGE/USD",
-    "SHIB/USD", "ADA/USD", "ARB/USD", "FIL/USD", "HYPE/USD", "LDO/USD",
-    "ONDO/USD", "POL/USD", "RENDER/USD", "WIF/USD", "BONK/USD"
+    "ADA/USD", "ARB/USD", "FIL/USD", "HYPE/USD", "LDO/USD",
+    "ONDO/USD", "POL/USD", "RENDER/USD"
 ]
 CRYPTO_MIN_SCORE    = 9          # slightly stricter than stocks (no SL safety net from broker)
 CRYPTO_RISK_PCT     = 1.0        # risk less per crypto trade (more volatile)
@@ -927,10 +927,12 @@ def get_zone(bars, highs, lows):
         return None, None, None
     rh    = highs[-1]["price"]
     rl    = lows[-1]["price"]
-    eq    = round((rh + rl) / 2, 4)
+    eq    = (rh + rl) / 2          # don't round here — kills sub-penny crypto (BONK, SHIB)
     price = bars[-1]["c"]
     zone  = "PREMIUM" if price > eq else "DISCOUNT" if price < eq else "EQUILIBRIUM"
-    return zone, eq, round((price - eq) / eq * 100, 2)
+    # Guard against eq == 0 (can happen with tiny-priced assets)
+    zone_pct = round((price - eq) / eq * 100, 2) if eq else 0.0
+    return zone, round(eq, 8), zone_pct
 
 def detect_patterns(bars):
     patterns = []
