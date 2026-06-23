@@ -48,8 +48,16 @@ pyramid_adds         = {}     # ticker -> number of adds so far
 
 # ── CRYPTO CONFIG ─────────────────────────────────────────
 CRYPTO_ENABLED      = True
-CRYPTO_UNIVERSE     = ["BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD",
-                       "AVAX/USD", "LINK/USD", "DOT/USD", "AAVE/USD"]
+# All Alpaca USD-tradable coins (as of 2026). Note: the smaller/meme coins
+# (BONK, WIF, SHIB, DOGE) are thinner and far more volatile — SMC signals are
+# less reliable on them. You can trim this list back to majors anytime.
+CRYPTO_UNIVERSE     = [
+    "BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD", "AVAX/USD", "LINK/USD",
+    "DOT/USD", "AAVE/USD", "BCH/USD", "UNI/USD", "MKR/USD", "YFI/USD",
+    "CRV/USD", "GRT/USD", "SUSHI/USD", "BAT/USD", "XTZ/USD", "DOGE/USD",
+    "SHIB/USD", "ADA/USD", "ARB/USD", "FIL/USD", "HYPE/USD", "LDO/USD",
+    "ONDO/USD", "POL/USD", "RENDER/USD", "WIF/USD", "BONK/USD"
+]
 CRYPTO_MIN_SCORE    = 9          # slightly stricter than stocks (no SL safety net from broker)
 CRYPTO_RISK_PCT     = 1.0        # risk less per crypto trade (more volatile)
 CRYPTO_MAX_OPEN     = 4          # max simultaneous crypto positions
