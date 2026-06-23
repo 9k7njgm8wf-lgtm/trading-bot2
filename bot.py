@@ -2651,8 +2651,9 @@ async def crypto_loop():
                         rr = round(abs(tp - entry) / abs(entry - sl), 1) if entry != sl else 0
                         await tg(session,
                             f"₿ CRYPTO BUY - {symbol}\n\n"
-                            f"Score: {score}/20  3TF: {tf_agrees}/3\n"
-                            f"RSI: {result['rsi']}  Zone: {result.get('zone')}\n\n"
+                            f"📈 Trend setup  Score: {score}/20\n"
+                            f"RSI: {result['rsi']}  15m: {result.get('trend_15m')}\n"
+                            f"EMA 9/21: {result['ema9']}/{result['ema21']}\n\n"
                             f"Entry: ${entry}\nSL: ${sl}\nTP: ${tp}\nR/R: 1:{rr}\n"
                             f"Qty: {qty}  (~${round(qty*entry,2)})")
 
