@@ -1122,6 +1122,97 @@ def compute_signal(bars_1m, bars_5m, bars_15m):
         "zone": zone, "equilibrium": eq, "zone_pct": zp,
     }
 
+def compute_crypto_signal(bars_1m, bars_5m, bars_15m):
+    """
+    Crypto-specific, long-only, TREND-FOLLOWING engine.
+
+    Why different from stocks:
+      - No VWAP (meaningless 24/7)
+      - Doesn't fade strength — buys pullbacks WITHIN an uptrend
+      - Doesn't block on high RSI (crypto trends keep RSI elevated)
+      - Uses EMA50 as a trend filter — only longs when the trend is up
+    Returns the same dict shape compute_signal uses, or None if no setup.
+    """
+    if len(bars_5m) < 30:
+        return None
+
+    closes = [b["c"] for b in bars_5m]
+    price  = closes[-1]
+    ema9   = calc_ema(closes, 9)
+    ema21  = calc_ema(closes, 21)
+    ema50  = calc_ema(closes, 50) if len(closes) >= 50 else calc_ema(closes, len(closes) - 1)
+    rsi    = calc_rsi(closes)
+    atr    = calc_atr(bars_5m)
+    if not all([ema9, ema21, ema50, rsi, atr]):
+        return None
+
+    # Higher-timeframe trend (15m) must also be up — don't fight it
+    trend_15m = "NEUTRAL"
+    if len(bars_15m) >= 21:
+        c15 = [b["c"] for b in bars_15m]
+        e9, e21 = calc_ema(c15, 9), calc_ema(c15, 21)
+        if e9 and e21:
+            trend_15m = "BULL" if e9 > e21 else "BEAR"
+
+    highs, lows = find_swings(bars_5m)
+    bos, choch  = detect_bos_choch(bars_5m, highs, lows)
+    obs         = find_order_blocks(bars_5m)
+    liq         = detect_liq_sweep(bars_5m, highs, lows)
+    sup, res    = get_sr(bars_5m)
+
+    # ── TREND FILTER: only go long in a confirmed uptrend ──
+    uptrend = ema9 > ema21 > ema50 and price > ema50
+    if not uptrend or trend_15m == "BEAR":
+        return None
+
+    # ── ENTRY: buy strength on a pullback toward the EMAs ──
+    near_ema = ema21 * 0.99 <= price <= ema9 * 1.005
+    recent_lows = [b["l"] for b in bars_5m[-5:]]
+    higher_lows = recent_lows[-1] >= recent_lows[0]
+
+    score = 0
+    if ema9 > ema21 > ema50:           score += 3
+    if price > ema50:                  score += 1
+    if trend_15m == "BULL":            score += 2
+    if near_ema:                       score += 3
+    if higher_lows:                    score += 2
+    if bos == "BULLISH_BOS":           score += 2
+    if choch == "BULLISH_CHOCH":       score += 2
+    if liq == "BULLISH_SWEEP":         score += 3
+    nearest_ob = next((ob for ob in reversed(obs)
+                       if ob["type"] == "BULLISH_OB" and ob["low"] <= price <= ob["high"] * 1.02), None)
+    if nearest_ob:                     score += 2
+    if 45 <= rsi <= 70:                score += 2
+    elif rsi > 80:                     score -= 3
+    if price < ema21:                  score -= 2
+
+    if score < CRYPTO_MIN_SCORE:
+        return None
+
+    conf = "HIGH" if score >= 12 else "MEDIUM"
+    sl = round(price - atr * CRYPTO_SL_ATR, 6)
+    tp = round(price + atr * CRYPTO_TP_ATR, 6)
+    risk, reward = abs(price - sl), abs(tp - price)
+    rr = "1:" + str(round(reward / risk, 1)) if risk > 0 else "N/A"
+
+    return {
+        "signal": "BUY", "confidence": conf, "entry": round(price, 6),
+        "sl": sl, "tp": tp, "rr": rr,
+        "vwap": None, "rsi": rsi, "ema9": ema9, "ema21": ema21,
+        "atr": atr, "vol_ratio": None,
+        "trend": "UPTREND", "trend_15m": trend_15m,
+        "momentum_1m": "UP" if higher_lows else "DOWN",
+        "bb_upper": None, "bb_lower": None,
+        "buy_score": score, "sell_score": 0,
+        "support": sup, "resistance": res,
+        "bb_squeeze": False,
+        "bos": bos, "choch": choch,
+        "nearest_ob": nearest_ob, "nearest_fvg": None,
+        "liq_sweep": liq, "smt": None, "po3": None,
+        "zone": "UPTREND", "equilibrium": round(ema21, 6),
+        "zone_pct": round((price - ema21) / ema21 * 100, 2) if ema21 else 0,
+    }
+
 # ══════════════════════════════════════════════════════════
 #  NEWS & SENTIMENT
 # ══════════════════════════════════════════════════════════
@@ -2525,37 +2616,20 @@ async def crypto_loop():
                         if len(bars_5m) < 20:
                             continue
 
-                        result = compute_signal(bars_1m, bars_5m, bars_15m)
+                        result = compute_crypto_signal(bars_1m, bars_5m, bars_15m)
                         if result is None:
-                            clog(symbol, "no signal")
+                            clog(symbol, "no trend setup")
                             continue
 
-                        # Crypto is long-only on Alpaca — ignore SELL signals
+                        # Crypto engine is long-only by design; this is a safety net
                         if result["signal"] != "BUY":
                             clog(symbol, "SELL signal (long-only, skip)")
                             continue
 
                         score = result["buy_score"]
-                        if score < CRYPTO_MIN_SCORE:
-                            clog(symbol, f"score {score}<{CRYPTO_MIN_SCORE}")
-                            continue
-
-                        # Require multi-timeframe agreement like stocks
-                        tf_agrees = check_3tf(bars_1m, bars_5m, bars_15m, "BUY")
-                        if tf_agrees < 2:
-                            clog(symbol, f"only {tf_agrees}/3 TF agree")
-                            continue
-
-                        # RSI overbought guard
-                        if result.get("rsi") and result["rsi"] > 72:
-                            clog(symbol, f"RSI overbought {result['rsi']}")
-                            continue
-
-                        # Don't buy into a PREMIUM zone with elevated RSI
-                        # (that's buying the high, not a discount entry)
-                        if result.get("zone") == "PREMIUM" and (result.get("rsi") or 0) > 55:
-                            clog(symbol, f"PREMIUM zone + RSI {result.get('rsi')} — skip (buying high)")
-                            continue
+                        # (Score, trend filter, RSI handling, and 15m agreement are all
+                        #  enforced inside compute_crypto_signal — no extra guards needed.)
+                        log(f"  CRYPTO {symbol}: ✅ trend setup score {score} RSI {result.get('rsi')}")
 
                         # Fresh price + SL/TP from ATR
                         price = await get_crypto_price(session, symbol)
