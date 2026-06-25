@@ -444,6 +444,10 @@ async def get_account_info(session: aiohttp.ClientSession):
                 "equity":       round(float(data.get("equity",       0)), 2),
                 "buying_power": round(float(data.get("buying_power", 0)), 2),
                 "cash":         round(float(data.get("cash",         0)), 2),
+                # True spendable cash for crypto (non-marginable). Crypto can't
+                # use margin, so this is what's actually available to buy with.
+                "free_cash":    round(float(data.get("non_marginable_buying_power",
+                                       data.get("cash", 0))), 2),
             }
     except Exception as e:
         log_err("get_account_info", e)
@@ -2488,34 +2492,37 @@ async def close_crypto_position(session: aiohttp.ClientSession, symbol: str):
         log_err(f"close_crypto_position {symbol}", e)
         return None
 
-def calc_crypto_size(entry: float, sl: float, equity: float, cash: float):
+def calc_crypto_size(entry: float, sl: float, equity: float, free_cash: float):
     """
-    Risk-based fractional sizing for crypto (long-only, no leverage).
-    CRITICAL: crypto cannot be bought on margin — it must be sized against
-    real USD cash, not buying power/equity. We cap by the smaller of:
-      - risk-based size (CRYPTO_RISK_PCT of equity)
-      - 20% of equity
-      - 90% of available cash (leave a buffer for fees/slippage)
+    Risk-based fractional sizing for crypto, hard-capped to TRULY available cash.
+    Crypto can't use margin, so we never request more than free_cash.
+    If little is left, it trades whatever fits (Alpaca min order is ~$1).
+
+    Returns qty (fractional). 0.0 only if there's basically no cash at all.
     """
     rps = abs(entry - sl)
-    if rps <= 0 or cash <= 0:
+    if rps <= 0 or free_cash <= 0 or entry <= 0:
         return 0.0
 
+    # Ideal risk-based size
     risk_amt = equity * (CRYPTO_RISK_PCT / 100)
     qty = risk_amt / rps
 
-    # Cap by 20% of equity
-    max_cost_equity = equity * 0.20
-    # Cap by available cash (crypto needs real USD), 90% to leave a buffer
-    max_cost_cash = cash * 0.90
-    max_cost = min(max_cost_equity, max_cost_cash)
-
+    # Hard caps, smallest wins:
+    #  - 20% of equity (concentration limit)
+    #  - 95% of TRULY available cash (the real constraint — leaves a tiny buffer)
+    max_cost = min(equity * 0.20, free_cash * 0.95)
     if qty * entry > max_cost:
         qty = max_cost / entry
 
-    # If we can't afford even a tiny position, return 0
-    if qty * entry < 1:
-        return 0.0
+    cost = qty * entry
+    # If even the capped size is below Alpaca's ~$1 minimum, but we DO have
+    # at least $1 free, trade the minimum the cash allows instead of skipping.
+    if cost < 1.0:
+        if free_cash >= 1.0:
+            qty = (free_cash * 0.95) / entry   # spend almost all remaining cash
+        else:
+            return 0.0   # genuinely can't afford a $1 order
 
     return round(qty, 6)
 
@@ -2641,11 +2648,11 @@ async def crypto_loop():
                         tp = round(entry + atr * CRYPTO_TP_ATR, 6)
 
                         acct = await get_account_info(session)
-                        equity = acct["equity"] if acct else ACCOUNT_SIZE
-                        cash   = acct["cash"]   if acct else ACCOUNT_SIZE
-                        qty = calc_crypto_size(entry, sl, equity, cash)
+                        equity    = acct["equity"]    if acct else ACCOUNT_SIZE
+                        free_cash = acct["free_cash"] if acct else ACCOUNT_SIZE
+                        qty = calc_crypto_size(entry, sl, equity, free_cash)
                         if qty <= 0:
-                            log(f"  CRYPTO {symbol}: can't afford position (cash ${cash})")
+                            log(f"  CRYPTO {symbol}: no free cash to trade (free ${free_cash})")
                             continue
 
                         rr = round(abs(tp - entry) / abs(entry - sl), 1) if entry != sl else 0
